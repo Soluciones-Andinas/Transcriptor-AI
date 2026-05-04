@@ -148,16 +148,24 @@ def test_compose_up_health_smoke():
     )
 
     try:
-        # Up + build. Long timeout: image build of CUDA base on first run is slow.
+        # Up + build. The CUDA base image (~5 GB) on a fresh host takes a while
+        # to pull on residential connections; allow up to 60 minutes once.
+        # Subsequent runs reuse the cached image and complete in ~30 seconds.
         up = subprocess.run(
             compose_args + ["up", "--build", "-d", "--wait"],
             cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            timeout=900,  # 15 min — first-time CUDA image pull is heavy
+            timeout=3600,
         )
         if up.returncode != 0:
-            pytest.fail(f"compose up failed:\nSTDOUT:\n{up.stdout}\nSTDERR:\n{up.stderr}")
+            # Capture container logs to make CI failures debuggable.
+            logs = subprocess.run(
+                compose_args + ["logs", "--tail=100"],
+                cwd=str(repo_root), capture_output=True, text=True, timeout=15,
+            )
+            pytest.fail(
+                f"compose up exited {up.returncode}\n"
+                f"--- container logs (tail 100) ---\n{logs.stdout}\n{logs.stderr}"
+            )
 
         # Wait for /health to come back healthy. `--wait` already polls the
         # healthcheck, but the healthcheck itself only requires HTTP 200,
