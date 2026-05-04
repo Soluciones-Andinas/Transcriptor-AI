@@ -16,6 +16,7 @@ from .models import (  # noqa: F401  (registers models on Base.metadata)
     UploadSession,
     User,
 )
+from .scoping import enable_per_user_scoping, set_session_user
 from .session import async_session_factory, engine, get_session
 
 __all__ = [
@@ -23,6 +24,8 @@ __all__ = [
     "engine",
     "async_session_factory",
     "get_session",
+    "enable_per_user_scoping",
+    "set_session_user",
     "User",
     "OAuthToken",
     "McpBearer",

@@ -63,6 +63,12 @@ async def lifespan(app: FastAPI):
     host = getattr(_db.engine.url, "host", "<unknown>")
     logger.info("db_engine_bound url_host=%s", host)
 
+    # S-1 (review fix): install the per-user scoping listener globally.
+    # Idempotent; subsequent calls are no-ops. Capa 2 auth middleware will
+    # populate `session.info["user_id"]` per request.
+    _db.enable_per_user_scoping()
+    logger.info("db_scoping_listener_enabled")
+
     try:
         yield
     finally:
