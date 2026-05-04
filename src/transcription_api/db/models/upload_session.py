@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, Uuid, func, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Text, Uuid, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -52,3 +52,8 @@ class UploadSession(Base):
     )
     uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Cleanup-job index for finding expired sessions to GC.
+    __table_args__ = (
+        Index("idx_upload_sessions_status_expires", "status", "expires_at"),
+    )

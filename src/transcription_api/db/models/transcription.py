@@ -12,7 +12,18 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, Text, Uuid, func, text
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Text,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,6 +32,8 @@ from ..base import Base
 
 class Transcription(Base):
     __tablename__ = "transcriptions"
+
+    # __table_args__ declared after column definitions below.
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -49,3 +62,20 @@ class Transcription(Base):
         server_default=func.now(),
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Explicit indexes declared at the model level so Alembic autogenerate can
+    # diff them and `alembic check` sees no drift. Names match the migration.
+    #
+    # Note: `idx_transcriptions_text_fts` (GIN to_tsvector('spanish', text))
+    # lives ONLY in the migration via op.execute(). SQLAlchemy cannot
+    # literal-render the `regconfig` type ('spanish'), so declaring the Index
+    # at the model level breaks autogenerate. The drift test in
+    # test_alembic.py filters this known case.
+    __table_args__ = (
+        Index(
+            "idx_transcriptions_user_created",
+            "user_id",
+            text("created_at DESC"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )

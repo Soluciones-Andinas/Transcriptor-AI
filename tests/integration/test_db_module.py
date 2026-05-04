@@ -81,6 +81,10 @@ def test_engine_from_settings():
     Spec: SPEC-capa1-postgres-orm-v1
     Criterion: AC-7 — engine.url uses asyncpg dialect and pool sizing comes from
     settings.db_pool_size / settings.db_pool_max_overflow.
+
+    Review fix M-2: assert against the configured maximum (`pool._pool.maxsize`
+    on asyncpg's QueuePool) rather than the *current* `pool.size()`, which is 0
+    until the first checkout under lazy initialization.
     """
     from transcription_api.config import settings
     from transcription_api.db import engine
@@ -88,9 +92,15 @@ def test_engine_from_settings():
     assert engine.url.drivername == "postgresql+asyncpg", (
         f"expected postgresql+asyncpg, got {engine.url.drivername}"
     )
-    # asyncpg engines wrap a sync pool; size is the configured pool_size
-    assert engine.pool.size() == settings.db_pool_size, (
-        f"engine.pool.size()={engine.pool.size()} but settings.db_pool_size={settings.db_pool_size}"
+    # Pool class is AsyncAdaptedQueuePool — it wraps a sync QueuePool whose
+    # `_pool.maxsize` is the configured `pool_size`.
+    assert engine.pool.__class__.__name__ in (
+        "AsyncAdaptedQueuePool", "QueuePool",
+    ), f"unexpected pool class: {engine.pool.__class__.__name__}"
+    # The QueuePool's underlying queue maxsize equals pool_size.
+    inner_maxsize = engine.pool._pool.maxsize  # type: ignore[attr-defined]
+    assert inner_maxsize == settings.db_pool_size, (
+        f"engine pool maxsize={inner_maxsize} but settings.db_pool_size={settings.db_pool_size}"
     )
     assert engine.url.username == settings.postgres_user
     assert engine.url.host == settings.postgres_host

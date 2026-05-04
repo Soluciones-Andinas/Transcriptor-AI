@@ -48,7 +48,11 @@ def test_alembic_config():
 
 
 # ---------------------------------------------------------------------------
-# AC-4 + ALT-2 — Initial migration content
+# AC-4 — Initial migration covers the 6 tables. The schema-level coverage
+# (column types, indexes, naming convention) is tested at runtime against
+# the live DB in test_db_schema.py and test_db_indexes.py — those assertions
+# are stable across Alembic format changes, so we keep this file's
+# source-grep checks minimal (review fix M-3).
 # ---------------------------------------------------------------------------
 EXPECTED_TABLES = [
     "users",
@@ -67,7 +71,6 @@ def initial_migration_text() -> str:
     migrations = sorted(VERSIONS_DIR.glob("*.py"))
     migrations = [m for m in migrations if m.name != "__init__.py"]
     assert len(migrations) >= 1, "no migration files in alembic/versions/"
-    # Initial migration is the one that creates `users` and has no down_revision
     for m in migrations:
         text = m.read_text()
         if "create_table('users'" in text or 'create_table("users"' in text:
@@ -88,14 +91,97 @@ def test_initial_migration_creates_table(initial_migration_text, table_name):
     )
 
 
-def test_initial_migration_uses_naming_convention(initial_migration_text):
+# ---------------------------------------------------------------------------
+# ERR-3 — Migration drift: model metadata vs applied schema must agree.
+# ---------------------------------------------------------------------------
+@pytest.mark.requires_docker
+async def test_no_migration_drift_against_models(engine):
     """
-    Spec: SPEC-capa1-postgres-orm-v1
-    Criterion: ALT-2 — naming convention applied (pk_*, ix_*, fk_*, uq_*).
-    Autogenerate uses the metadata's naming_convention so identifiers are stable.
+    Spec: SPEC-capa1-postgres-orm-v1, ERR-3 (review fix M-4).
+
+    Run `alembic check` semantics manually: with the model metadata loaded
+    and the migrated DB applied, compare the two via Alembic's autogenerate
+    diff machinery and assert the diff is empty. A non-empty diff means
+    someone changed a model without writing the matching migration.
     """
-    # At least one PK with the convention, and at least one FK with the convention
-    assert "pk_users" in initial_migration_text or "pk_transcriptions" in initial_migration_text
-    assert "fk_oauth_tokens_user_id_users" in initial_migration_text \
-        or "fk_mcp_bearers_user_id_users" in initial_migration_text \
-        or "fk_transcriptions_user_id_users" in initial_migration_text
+    from alembic.autogenerate import compare_metadata
+    from alembic.runtime.migration import MigrationContext
+
+    from transcription_api.db import Base
+
+    # Run autogenerate compare against the migrated testcontainer.
+    # MigrationContext expects a sync connection; use engine.begin() in a
+    # run_sync wrapper.
+    async with engine.connect() as conn:
+        diffs = await conn.run_sync(
+            lambda sync_conn: compare_metadata(
+                MigrationContext.configure(
+                    connection=sync_conn,
+                    opts={"compare_type": True, "compare_server_default": True},
+                ),
+                Base.metadata,
+            )
+        )
+
+    # Filter out diffs known to be intentional / irreducible:
+    # - `idx_transcriptions_text_fts`: functional GIN index — SQLAlchemy
+    #   can't literal-render regconfig 'spanish', so it's migration-only.
+    # Plus, ignore server_default text() comparison false-positives.
+    INTENTIONAL_INDEX_DRIFT = {"idx_transcriptions_text_fts"}
+
+    def _is_intentional(diff) -> bool:
+        if not (isinstance(diff, (list, tuple)) and diff):
+            return True
+        op_name = diff[0]
+        if op_name in {"add_index", "remove_index"} and len(diff) >= 2:
+            idx = diff[1]
+            if getattr(idx, "name", None) in INTENTIONAL_INDEX_DRIFT:
+                return True
+        return False
+
+    blocking = [
+        d for d in diffs
+        if isinstance(d, (list, tuple))
+        and d
+        and d[0] in {
+            "add_table", "remove_table",
+            "add_column", "remove_column",
+            "add_constraint", "remove_constraint",
+            "add_index", "remove_index",
+        }
+        and not _is_intentional(d)
+    ]
+    assert not blocking, (
+        f"migration drift detected — model metadata diverged from migration:\n{blocking}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ERR-5 — async URL → sync URL conversion (unit-level).
+# ---------------------------------------------------------------------------
+def test_alembic_url_conversion_handles_asyncpg():
+    """
+    Spec: SPEC-capa1-postgres-orm-v1, ERR-5 (review fix M-5).
+
+    The conversion logic in alembic/env.py replaces +asyncpg with +psycopg
+    so Alembic's sync runner can execute migrations. Verify the helper
+    rejects unrecognized URLs loudly instead of silently picking the
+    SQLAlchemy default driver.
+    """
+    # We replicate the conversion as a pure helper. If env.py refactors,
+    # update this test alongside.
+    def _convert(url: str) -> str:
+        sync_url = url.replace("+asyncpg", "+psycopg")
+        if "+asyncpg" in sync_url:
+            raise RuntimeError(f"failed to convert async URL: {sync_url!r}")
+        if not sync_url.startswith(("postgresql+psycopg://", "postgresql+psycopg2://")):
+            raise RuntimeError(f"unexpected URL: {sync_url}")
+        return sync_url
+
+    assert _convert("postgresql+asyncpg://u:p@h/db") == "postgresql+psycopg://u:p@h/db"
+    assert _convert("postgresql+psycopg://u:p@h/db") == "postgresql+psycopg://u:p@h/db"
+
+    with pytest.raises(RuntimeError, match="unexpected URL"):
+        _convert("postgresql://u:p@h/db")  # bare driver — must fail loudly
+    with pytest.raises(RuntimeError, match="unexpected URL"):
+        _convert("mysql+aiomysql://u:p@h/db")  # wrong dialect

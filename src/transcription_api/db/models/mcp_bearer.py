@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Text, Uuid, func, text
+from sqlalchemy import DateTime, ForeignKey, Index, Text, Uuid, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -40,3 +40,13 @@ class McpBearer(Base):
     )
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Partial UNIQUE: at most one active bearer per user (RF-AUTH-07).
+    __table_args__ = (
+        Index(
+            "uq_mcp_bearers_active_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )

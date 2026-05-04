@@ -88,47 +88,77 @@ async def test_cascade_delete_user_clears_all_dependents(session):
     Criterion: AC-12 — deleting a User cascades to oauth_tokens, mcp_bearers,
     transcriptions, images, and upload_sessions (all 5 child tables).
 
-    Postgres evaluates the cascade tree within the same DELETE statement, so
-    even though `upload_sessions.bearer_id` has no cascade, the row goes away
-    via its `user_id` cascade before the bearer FK is checked.
-    """
-    user = await make_user(session)
-    bearer = await make_bearer(session, user_id=user.id)
-    await make_oauth_token(session, user_id=user.id)
-    tr = await make_transcription(session, user_id=user.id)
-    await make_image(session, transcription_id=tr.id, user_id=user.id)
-    await make_upload_session(session, user_id=user.id, bearer_id=bearer.id)
+    Review fix M-1: insert ≥3 rows per child for the target user, plus a
+    second untouched user with their own data. After delete:
+    - all rows for the target user must be gone (catches partial cascades);
+    - all rows for the untouched user must remain (catches over-cascade
+      bugs, e.g. a missing WHERE clause in a future DELETE-trigger).
 
-    # Sanity: each child table has exactly 1 row for this user before delete.
-    for model, label in [
-        (OAuthToken, "oauth_tokens"),
-        (McpBearer, "mcp_bearers"),
-        (Transcription, "transcriptions"),
-        (Image, "images"),
-        (UploadSession, "upload_sessions"),
-    ]:
+    Postgres evaluates the cascade tree within the same DELETE statement, so
+    even though `upload_sessions.bearer_id` has no cascade, the rows go away
+    via their `user_id` cascade before the bearer FK is checked.
+    """
+    target = await make_user(session, email="target@sandinas.test")
+    bystander = await make_user(session, email="bystander@sandinas.test")
+
+    # Multi-row setup for the user being deleted.
+    target_bearer1 = await make_bearer(session, user_id=target.id)
+    target_bearer2 = await make_bearer(
+        session, user_id=target.id,
+        revoked_at=__import__("datetime").datetime.now(
+            tz=__import__("datetime").timezone.utc,
+        ),
+    )
+    await make_oauth_token(session, user_id=target.id)
+    target_tr1 = await make_transcription(session, user_id=target.id)
+    target_tr2 = await make_transcription(session, user_id=target.id)
+    target_tr3 = await make_transcription(session, user_id=target.id)
+    await make_image(session, transcription_id=target_tr1.id, user_id=target.id)
+    await make_image(session, transcription_id=target_tr2.id, user_id=target.id)
+    await make_image(session, transcription_id=target_tr3.id, user_id=target.id)
+    await make_upload_session(session, user_id=target.id, bearer_id=target_bearer1.id)
+    await make_upload_session(session, user_id=target.id, bearer_id=target_bearer1.id)
+    await make_upload_session(session, user_id=target.id, bearer_id=target_bearer2.id)
+
+    # Untouched bystander rows.
+    bystander_bearer = await make_bearer(session, user_id=bystander.id)
+    await make_oauth_token(session, user_id=bystander.id)
+    bystander_tr = await make_transcription(session, user_id=bystander.id)
+    await make_image(session, transcription_id=bystander_tr.id, user_id=bystander.id)
+    await make_upload_session(session, user_id=bystander.id, bearer_id=bystander_bearer.id)
+
+    expected_target_counts = {
+        OAuthToken: 1,
+        McpBearer: 2,
+        Transcription: 3,
+        Image: 3,
+        UploadSession: 3,
+    }
+    for model, expected in expected_target_counts.items():
         n = (
             await session.execute(
-                select(func.count()).select_from(model).where(model.user_id == user.id)
+                select(func.count()).select_from(model).where(model.user_id == target.id)
             )
         ).scalar_one()
-        assert n == 1, f"setup invariant broken: {label} has {n} rows, expected 1"
+        assert n == expected, f"setup invariant broken on {model.__name__}: {n} != {expected}"
 
-    # Cascade delete the parent.
-    await session.execute(delete(User).where(User.id == user.id))
+    # Cascade delete the target.
+    await session.execute(delete(User).where(User.id == target.id))
     await session.flush()
 
-    # All 5 child tables must now have 0 rows for this user.
-    for model, label in [
-        (OAuthToken, "oauth_tokens"),
-        (McpBearer, "mcp_bearers"),
-        (Transcription, "transcriptions"),
-        (Image, "images"),
-        (UploadSession, "upload_sessions"),
-    ]:
-        n = (
+    for model in expected_target_counts:
+        target_n = (
             await session.execute(
-                select(func.count()).select_from(model).where(model.user_id == user.id)
+                select(func.count()).select_from(model).where(model.user_id == target.id)
             )
         ).scalar_one()
-        assert n == 0, f"cascade incomplete: {label} still has {n} rows after user delete"
+        bystander_n = (
+            await session.execute(
+                select(func.count()).select_from(model).where(model.user_id == bystander.id)
+            )
+        ).scalar_one()
+        assert target_n == 0, f"cascade incomplete: {model.__name__} still has {target_n} target rows"
+        assert bystander_n == 1, (
+            f"cascade over-reached: {model.__name__} bystander rows changed "
+            f"({bystander_n} != 1)"
+        )

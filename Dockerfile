@@ -11,7 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/data/models/huggingface \
     TORCH_HOME=/data/models/torch
 
-# Sistema: Python 3.10 (compat WhisperX), ffmpeg, libsndfile (pyannote), curl (healthcheck), git (algunos pip installs lo requieren)
+# Sistema: Python 3.10 (compat WhisperX), ffmpeg, libsndfile (pyannote), curl (healthcheck), git (pip), postgresql-client (pg_isready en entrypoint)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.10 \
         python3.10-venv \
@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
         curl \
         git \
+        postgresql-client \
         ca-certificates \
     && ln -sf /usr/bin/python3.10 /usr/bin/python \
     && ln -sf /usr/bin/python3.10 /usr/bin/python3 \

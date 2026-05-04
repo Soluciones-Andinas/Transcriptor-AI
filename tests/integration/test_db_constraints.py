@@ -58,6 +58,67 @@ async def test_partial_unique_allows_active_after_revoking(session):
     await make_bearer(session, user_id=user.id, token_hash="new-hash", revoked_at=None)
 
 
+async def test_partial_unique_under_concurrent_inserts(migrated_db_url):
+    """
+    Spec: SPEC-capa1-postgres-orm-v1
+    Criterion: AC-13 (review fix M-6) — under concurrent inserts of two
+    active bearers for the same user, the partial UNIQUE must let exactly
+    one succeed and the other raise IntegrityError. This catches a future
+    regression where someone replaces the index with an app-level check
+    that has a race window.
+    """
+    import asyncio
+    import secrets
+
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+    from sqlalchemy.exc import IntegrityError
+
+    engine = create_async_engine(migrated_db_url, future=True)
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+
+    # Setup: one user, committed so both concurrent sessions can see them.
+    async with factory() as setup:
+        user = await make_user(setup)
+        await setup.commit()
+        user_id = user.id
+
+    async def _insert_active_bearer() -> bool:
+        """Returns True on commit, False on IntegrityError."""
+        async with factory() as s:
+            try:
+                await make_bearer(
+                    s, user_id=user_id, token_hash=secrets.token_hex(16), revoked_at=None,
+                )
+                await s.commit()
+                return True
+            except IntegrityError:
+                return False
+
+    try:
+        results = await asyncio.gather(
+            _insert_active_bearer(),
+            _insert_active_bearer(),
+            return_exceptions=False,
+        )
+        # Exactly one must succeed.
+        assert results.count(True) == 1, (
+            f"partial UNIQUE failed under race — both inserts succeeded? results={results}"
+        )
+        assert results.count(False) == 1
+    finally:
+        # Cleanup: remove the user we created so the test is idempotent.
+        async with factory() as s:
+            from transcription_api.db.models import User
+            from sqlalchemy import delete
+            await s.execute(delete(User).where(User.id == user_id))
+            await s.commit()
+        await engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # AC-14 — Spanish full-text search on transcriptions.text
 # ---------------------------------------------------------------------------

@@ -95,30 +95,114 @@ def test_compose_postgres_healthcheck_and_depends_on():
 # ---------------------------------------------------------------------------
 # Live smoke (operator runs on the rig)
 # ---------------------------------------------------------------------------
-def _gpu_available() -> bool:
-    """Detect nvidia-container-toolkit by probing `docker info`."""
+def _docker_available() -> bool:
+    """Probe whether `docker compose` will work locally."""
     if not shutil.which("docker"):
         return False
     try:
         result = subprocess.run(
-            ["docker", "info", "--format", "{{json .Runtimes}}"],
+            ["docker", "info"],
             capture_output=True,
-            text=True,
             timeout=5,
         )
     except (subprocess.TimeoutExpired, OSError):
         return False
-    return "nvidia" in (result.stdout or "")
+    return result.returncode == 0
 
 
-@pytest.mark.skipif(not _gpu_available(), reason="rig with nvidia-container-toolkit required")
+@pytest.mark.skipif(not _docker_available(), reason="docker daemon required")
 def test_compose_up_health_smoke():
     """
     Spec: SPEC-capa1-postgres-orm-v1
-    Criterion: AC-15 — full `docker compose up --build -d` brings up both
-    services healthy, and `curl /health` reports `db_reachable: true`.
+    Criterion: AC-15 (review fix CR-2) — full `docker compose up --build`
+    brings up the stack with auto-migrations and `/health` reports
+    `db_reachable: true`.
 
-    This is the canonical AC-15 acceptance. On non-GPU hosts (developer
-    Macs), this test is skipped — operators run it on the rig before deploy.
+    Uses `docker-compose.cpu.yml` override to strip `gpus: all` so the test
+    runs on Mac (no nvidia-container-toolkit) AND on the production rig.
+    The CUDA Docker image still builds; we just don't reserve a GPU at
+    runtime. Inside the container, /health reports `gpu_backend: cpu`,
+    which is the right thing to assert here.
+
+    Operators on the rig validate the FULL GPU path with
+    `bash scripts/smoke-capa1.sh` (no override = `gpus: all` enforced).
     """
-    pytest.skip("Live smoke; run manually on the rig with `bash scripts/smoke-capa1.sh`")
+    import json
+    import time
+
+    repo_root = REPO_ROOT
+    project_name = "transcription-api-e2e"
+    compose_args = [
+        "docker", "compose",
+        "-p", project_name,
+        "-f", str(repo_root / "docker-compose.yml"),
+        "-f", str(repo_root / "docker-compose.cpu.yml"),
+    ]
+
+    # Pre-test cleanup — leftover state would defeat the smoke.
+    subprocess.run(
+        compose_args + ["down", "-v", "--remove-orphans"],
+        cwd=str(repo_root),
+        capture_output=True,
+        timeout=60,
+    )
+
+    try:
+        # Up + build. Long timeout: image build of CUDA base on first run is slow.
+        up = subprocess.run(
+            compose_args + ["up", "--build", "-d", "--wait"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=900,  # 15 min — first-time CUDA image pull is heavy
+        )
+        if up.returncode != 0:
+            pytest.fail(f"compose up failed:\nSTDOUT:\n{up.stdout}\nSTDERR:\n{up.stderr}")
+
+        # Wait for /health to come back healthy. `--wait` already polls the
+        # healthcheck, but the healthcheck itself only requires HTTP 200,
+        # not db_reachable=true. Re-poll for the stronger assertion.
+        deadline = time.time() + 120
+        last_response = None
+        while time.time() < deadline:
+            try:
+                result = subprocess.run(
+                    ["curl", "-fsS", "http://localhost:8000/health"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    last_response = json.loads(result.stdout)
+                    if last_response.get("db_reachable") is True:
+                        break
+            except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+                pass
+            time.sleep(3)
+
+        assert last_response is not None, "no successful /health response"
+        assert last_response["db_reachable"] is True, (
+            f"db_reachable was {last_response.get('db_reachable')}; full body: {last_response}"
+        )
+        # gpu_backend=cpu is the expected value under the cpu override.
+        assert last_response["gpu_backend"] in {"cuda", "mps", "cpu"}
+        assert last_response["status"] == "ok"
+
+        # Verify alembic actually ran (not just that /health returns 200).
+        alembic_check = subprocess.run(
+            compose_args + ["exec", "-T", "postgres",
+                            "psql", "-U", "transcription", "-d", "transcription_api",
+                            "-tAc", "SELECT version_num FROM alembic_version"],
+            cwd=str(repo_root),
+            capture_output=True, text=True, timeout=10,
+        )
+        version = (alembic_check.stdout or "").strip()
+        assert len(version) == 12, (
+            f"alembic_version not at head: stdout={alembic_check.stdout!r} "
+            f"stderr={alembic_check.stderr!r}"
+        )
+    finally:
+        subprocess.run(
+            compose_args + ["down", "-v", "--remove-orphans"],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=60,
+        )
