@@ -1,0 +1,21 @@
+# docker-compose override — strip GPU requirements for CI / dev-laptop e2e.
+#
+# Use:  docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
+#
+# Allows the e2e smoke (CR-2) to validate the postgres+entrypoint+alembic+
+# /health chain on machines without nvidia-container-toolkit (Macs, GitHub
+# Actions runners). Production deploys to the rig keep using the base file
+# only.
+#
+# What this strips:
+# - `gpus: all` reservation (would fail without nvidia-container-toolkit).
+# - The CUDA-base Docker image is still built; we just don't *demand* a GPU
+#   at runtime. torch.cuda.is_available() will return False inside the
+#   container, /health will report gpu_backend: cpu, and that is the
+#   correct behavior to assert in the e2e smoke.
+
+services:
+  transcription-api:
+    # `null` removes the upstream `gpus` field entirely.
+    gpus: !reset null
+    deploy: !reset null

@@ -13,20 +13,31 @@ authors = [
     { name = "Soluciones Andinas — IA Adoption", email = "ia@sandinas.local" },
 ]
 
-# Fase 1 (infra smoke test): solo dependencias para que GET /health corra.
-# Las dependencias pesadas (whisperx, pyannote.audio, torch) se agregan en Fase 2
-# cuando se implementa el pipeline real. Esto reduce el tiempo del primer build
-# de ~15 min a ~2 min y permite validar la infra sin descargar 4 GB de wheels.
+# Core dependencies — necesarias para que el servicio arranque (incluido auth + DB).
+# Las dependencias pesadas del pipeline IA (whisperx, pyannote.audio, torch) están en
+# el extra [pipeline] para no inflar el primer build cuando se implementan otras
+# capas (auth, UI, MCP server) que no las necesitan.
 dependencies = [
+    # HTTP framework
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+
+    # Validación + settings
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
-    "python-multipart>=0.0.12",
+
+    # Persistencia (Capa 1) — SQLAlchemy 2.0 async + asyncpg + Alembic
+    # Decisión arquitectural: ver wiki/ADR/ADR-008.md
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29.0",
+    "psycopg[binary]>=3.1.0",  # sync driver, used only by Alembic (ERR-5)
+    "alembic>=1.13.0",
+    "greenlet>=3.0.0",  # requerido por sqlalchemy async incluso sin uso explícito
 ]
 
 [project.optional-dependencies]
-# Pipeline real (Fase 2). Activar con: pip install -e ".[pipeline]"
+# Pipeline IA (Capa 4 en adelante). Activar con: pip install -e ".[pipeline]"
 pipeline = [
     "whisperx>=3.8.5",
     "pyannote.audio>=3.1.0",
@@ -41,6 +52,10 @@ dev = [
     "httpx>=0.27.0",
     "freezegun>=1.5.0",
     "ruff>=0.7.0",
+    # Testing con Postgres real en contenedor efímero
+    "testcontainers[postgres]>=4.8.0",
+    # Driving startup/shutdown of the ASGI app from async tests (AC-8 + AC-9)
+    "asgi-lifespan>=2.1.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -58,3 +73,11 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# `e2e` tests drive `docker compose` and take 60-90s. Excluded from default
+# pytest run; opt in with `pytest -m e2e`.
+addopts = "-m 'not e2e'"
+markers = [
+    "requires_docker: test needs a running Docker daemon (testcontainers).",
+    "requires_gpu: test needs a CUDA or MPS accelerator (skip otherwise).",
+    "e2e: end-to-end smoke against `docker compose up` (slow, opt-in).",
+]

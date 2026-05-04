@@ -1,12 +1,15 @@
 # docker-compose.yml — transcription-api
-# Single service con GPU pass-through, volumen persistente para modelos+caché.
+# Dos servicios: API (FastAPI + GPU pass-through) + Postgres (persistencia
+# relacional, ADR-008). Comparten una network interna; solo el puerto 8000
+# de la API se expone al host.
+#
 # Uso: docker compose up -d
 #
 # Prerequisitos en el rig:
 # - Docker Engine 24+ con docker-compose plugin v2.20+
 # - nvidia-container-toolkit instalado y configurado
 # - GPU NVIDIA con drivers >= 535, CUDA 12.1+ compatible
-# - Archivo .env con HF_TOKEN válido (copiar desde .env.example)
+# - Archivo .env con valores reales (copiar desde .env.example)
 
 services:
   transcription-api:
@@ -43,16 +46,28 @@ services:
       DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-es}
       COMPUTE_TYPE: ${COMPUTE_TYPE:-float16}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+      MAX_IMAGE_UPLOAD_MB: ${MAX_IMAGE_UPLOAD_MB:-25}
       PIPELINE_TIMEOUT_SECONDS: ${PIPELINE_TIMEOUT_SECONDS:-1800}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-86400}
       CACHE_CLEANUP_INTERVAL_SECONDS: ${CACHE_CLEANUP_INTERVAL_SECONDS:-3600}
+      # Persistencia: el host es el nombre del servicio en la red interna de compose.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
 
     volumes:
-      # Modelos pre-descargados (Whisper, pyannote, alignment) — persisten entre rebuilds
+      # Modelos pre-descargados (Whisper, pyannote, alignment)
       - ./data/models:/data/models
-      # Caché temporal de transcripciones (TTL 24h por default)
+      # Caché efímero de pipeline (TTL 24h)
       - ./data/cache:/data/cache
+      # Uploads temporales (borrados tras start_transcription)
+      - ./data/uploads:/data/uploads
+      # Blobs persistentes de imágenes adjuntas a transcripciones
+      - ./data/blobs:/data/blobs
+
+    depends_on:
+      postgres:
+        condition: service_healthy
 
     # Healthcheck: GET /health debe responder 200.
     # start_period 90s: tiempo holgado para que lifespan cargue Whisper large-v3 + pyannote en VRAM.
@@ -69,3 +84,49 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL 16 — datos persistentes con identidad de usuario (ADR-008).
+  # Caché efímero por audio_hash sigue en filesystem (ADR-004 vigente).
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: transcription-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-transcription}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-transcription_api}
+
+    volumes:
+      # Datadir persistente. NO se expone como bind mount al host por default
+      # (named volume) para evitar problemas de permisos y mejorar performance.
+      - postgres-data:/var/lib/postgresql/data
+
+    # No exponer el puerto al host por default (evita exposición accidental
+    # en intranet). Si el operador necesita psql desde el host:
+    #   docker compose exec postgres psql -U $POSTGRES_USER -d $POSTGRES_DB
+    # Si se necesita conectar desde una herramienta externa (DBeaver, etc.),
+    # descomentar:
+    # ports:
+    #   - "5432:5432"
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -U ${POSTGRES_USER:-transcription} -d ${POSTGRES_DB:-transcription_api}"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  postgres-data:
+    name: transcription-postgres-data
