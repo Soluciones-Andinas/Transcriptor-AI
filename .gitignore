@@ -39,7 +39,11 @@ Thumbs.db
 # Project specific
 .env
 *.log
+# `models/` here means downloaded ML model weights (Whisper, pyannote).
+# The ORM models in src/transcription_api/db/models/ are source code and
+# explicitly un-ignored below.
 models/
+!src/transcription_api/db/models/
 checkpoints/
 *.wav
 *.mp3
