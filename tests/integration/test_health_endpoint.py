@@ -67,3 +67,40 @@ async def test_health_reports_db_reachable_false_when_db_down(engine, monkeypatc
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["db_reachable"] is False
+
+
+async def test_health_reports_gpu_backend(engine):
+    """
+    Review fix (review-A): /health must report which accelerator backend is
+    active — `cuda` on the rig, `mps` on dev Macs, `cpu` otherwise.
+    """
+    async with _client_with_engine(engine) as client:
+        r = await client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["gpu_backend"] in {"cuda", "mps", "cpu"}
+        # Cross-field invariant: gpu_available reflects the backend.
+        if body["gpu_backend"] == "cpu":
+            assert body["gpu_available"] is False
+        else:
+            assert body["gpu_available"] is True
+
+
+async def test_pool_exhaustion_on_uncaught_endpoint_returns_503(engine, monkeypatch):
+    """
+    Review fix (CR-1): for endpoints that do NOT catch DB errors, the global
+    handler maps SQLAlchemy pool TimeoutError to 503 with stable error_code.
+    """
+    from sqlalchemy.exc import TimeoutError as SAQueueTimeoutError
+    from transcription_api.main import app
+
+    @app.get("/_test_pool_exhaustion_probe")
+    async def _probe():
+        raise SAQueueTimeoutError("simulated pool exhaustion")
+
+    async with _client_with_engine(engine) as client:
+        r = await client.get("/_test_pool_exhaustion_probe")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["error_code"] == "DB_POOL_EXHAUSTED"
+    assert "Retry-After" in r.headers

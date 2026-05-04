@@ -7,10 +7,13 @@ Spec: SPEC-capa1-postgres-orm-v1
 
 ERR-4 honored: tests requiring Docker are auto-skipped if testcontainers can't
 reach the daemon (e.g., dev machine without Docker running).
+
+`requires_gpu` marker: tests that need a CUDA or MPS accelerator are auto-skipped
+on CPU-only machines. Resolution uses `transcription_api.gpu.detect_accelerator`,
+the same helper `/health` uses, so test environment matches runtime exactly.
 """
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncGenerator, Generator
 
 import pytest
@@ -18,13 +21,23 @@ import pytest_asyncio
 
 
 # ---------------------------------------------------------------------------
-# Marker registration
+# Marker-driven auto-skip
 # ---------------------------------------------------------------------------
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers",
-        "requires_docker: test requires a running Docker daemon (testcontainers).",
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip `requires_gpu`-marked tests when no accelerator is detected."""
+    from transcription_api.gpu import detect_accelerator
+
+    accel = detect_accelerator()
+    if accel.available:
+        return  # nothing to skip
+
+    skip_no_gpu = pytest.mark.skip(
+        reason=f"no accelerator detected (backend={accel.backend}); "
+        "requires CUDA (NVIDIA) or MPS (Apple Silicon)"
     )
+    for item in items:
+        if "requires_gpu" in item.keywords:
+            item.add_marker(skip_no_gpu)
 
 
 # ---------------------------------------------------------------------------
