@@ -12,8 +12,11 @@ from __future__ import annotations
 from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase
 
+# Convention chosen to match wiki/05_modelo_datos.md §2: indexes use the
+# `idx_*` prefix instead of SQLAlchemy's default `ix_*`. Unique constraints
+# stay `uq_*`; primary keys `pk_*`; foreign keys `fk_*`; check constraints `ck_*`.
 NAMING_CONVENTION = {
-    "ix": "ix_%(table_name)s_%(column_0_name)s",
+    "ix": "idx_%(table_name)s_%(column_0_name)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
     "ck": "ck_%(table_name)s_%(constraint_name)s",
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",

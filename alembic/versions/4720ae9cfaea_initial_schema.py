@@ -1,8 +1,8 @@
 """initial schema
 
-Revision ID: 3af97fd79d34
+Revision ID: 4720ae9cfaea
 Revises: 
-Create Date: 2026-05-04 14:26:11.889293
+Create Date: 2026-05-04 15:00:57.421257
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '3af97fd79d34'
+revision: str = '4720ae9cfaea'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -44,7 +44,7 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id', name=op.f('pk_mcp_bearers')),
     sa.UniqueConstraint('token_hash', name=op.f('uq_mcp_bearers_token_hash'))
     )
-    op.create_index(op.f('ix_mcp_bearers_user_id'), 'mcp_bearers', ['user_id'], unique=False)
+    op.create_index(op.f('idx_mcp_bearers_user_id'), 'mcp_bearers', ['user_id'], unique=False)
     op.create_table('oauth_tokens',
     sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('user_id', sa.Uuid(), nullable=False),
@@ -74,7 +74,7 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_transcriptions_user_id_users'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_transcriptions'))
     )
-    op.create_index(op.f('ix_transcriptions_audio_hash'), 'transcriptions', ['audio_hash'], unique=False)
+    op.create_index(op.f('idx_transcriptions_audio_hash'), 'transcriptions', ['audio_hash'], unique=False)
     op.create_table('images',
     sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('transcription_id', sa.Uuid(), nullable=False),
@@ -90,8 +90,8 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_images_user_id_users'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_images'))
     )
-    op.create_index(op.f('ix_images_transcription_id'), 'images', ['transcription_id'], unique=False)
-    op.create_index(op.f('ix_images_user_id'), 'images', ['user_id'], unique=False)
+    op.create_index(op.f('idx_images_transcription_id'), 'images', ['transcription_id'], unique=False)
+    op.create_index(op.f('idx_images_user_id'), 'images', ['user_id'], unique=False)
     op.create_table('upload_sessions',
     sa.Column('id', sa.Uuid(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('user_id', sa.Uuid(), nullable=False),
@@ -112,22 +112,71 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id', name=op.f('pk_upload_sessions')),
     sa.UniqueConstraint('nonce', name=op.f('uq_upload_sessions_nonce'))
     )
-    op.create_index(op.f('ix_upload_sessions_user_id'), 'upload_sessions', ['user_id'], unique=False)
+    op.create_index(op.f('idx_upload_sessions_user_id'), 'upload_sessions', ['user_id'], unique=False)
     # ### end Alembic commands ###
+
+    # ------------------------------------------------------------------
+    # Indexes that Alembic autogenerate cannot infer (wiki/05_modelo_datos.md §2):
+    # functional GIN, partial UNIQUE, composite-with-DESC, composite for cleanup.
+    # ------------------------------------------------------------------
+
+    # Composite per-user index for "list my recent meetings", partial on
+    # `deleted_at IS NULL` so soft-deleted rows do not bloat the index.
+    op.create_index(
+        "idx_transcriptions_user_created",
+        "transcriptions",
+        [sa.text("user_id"), sa.text("created_at DESC")],
+        unique=False,
+        postgresql_where=sa.text("deleted_at IS NULL"),
+    )
+
+    # GIN full-text-search on the spanish-stemmed transcription text.
+    # `op.execute` is required because Alembic's create_index does not render
+    # functional expressions like `to_tsvector('spanish', text)` cleanly.
+    op.execute(
+        "CREATE INDEX idx_transcriptions_text_fts "
+        "ON transcriptions USING gin (to_tsvector('spanish', text))"
+    )
+
+    # At-most-one active bearer per user (RF-AUTH-07): partial UNIQUE on
+    # `(user_id) WHERE revoked_at IS NULL`. Coexists with the global
+    # `uq_mcp_bearers_token_hash` UNIQUE on `token_hash`.
+    op.create_index(
+        "uq_mcp_bearers_active_per_user",
+        "mcp_bearers",
+        ["user_id"],
+        unique=True,
+        postgresql_where=sa.text("revoked_at IS NULL"),
+    )
+
+    # Composite on `(status, expires_at)` for the cleanup job that scans for
+    # expired upload sessions (RF-IMG / RF-TRX upload lifecycle).
+    op.create_index(
+        "idx_upload_sessions_status_expires",
+        "upload_sessions",
+        ["status", "expires_at"],
+        unique=False,
+    )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
+    # Drop the manually-added indexes first (reverse order of creation).
+    op.drop_index("idx_upload_sessions_status_expires", table_name="upload_sessions")
+    op.drop_index("uq_mcp_bearers_active_per_user", table_name="mcp_bearers")
+    op.execute("DROP INDEX IF EXISTS idx_transcriptions_text_fts")
+    op.drop_index("idx_transcriptions_user_created", table_name="transcriptions")
+
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_index(op.f('ix_upload_sessions_user_id'), table_name='upload_sessions')
+    op.drop_index(op.f('idx_upload_sessions_user_id'), table_name='upload_sessions')
     op.drop_table('upload_sessions')
-    op.drop_index(op.f('ix_images_user_id'), table_name='images')
-    op.drop_index(op.f('ix_images_transcription_id'), table_name='images')
+    op.drop_index(op.f('idx_images_user_id'), table_name='images')
+    op.drop_index(op.f('idx_images_transcription_id'), table_name='images')
     op.drop_table('images')
-    op.drop_index(op.f('ix_transcriptions_audio_hash'), table_name='transcriptions')
+    op.drop_index(op.f('idx_transcriptions_audio_hash'), table_name='transcriptions')
     op.drop_table('transcriptions')
     op.drop_table('oauth_tokens')
-    op.drop_index(op.f('ix_mcp_bearers_user_id'), table_name='mcp_bearers')
+    op.drop_index(op.f('idx_mcp_bearers_user_id'), table_name='mcp_bearers')
     op.drop_table('mcp_bearers')
     op.drop_table('users')
     # ### end Alembic commands ###
