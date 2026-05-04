@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+.env
+*.log
+models/
+checkpoints/
+*.wav
+*.mp3
+*.mp4
+*.m4a
+*.flac
+tests/fixtures/audio/
+!tests/fixtures/audio/.gitkeep
+
+# Docker volumes (mounted into the container at runtime)
+data/
+
+# graphify outputs (regenerable)
+graphify-out/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Hugging Face cache
+.cache/
+huggingface/

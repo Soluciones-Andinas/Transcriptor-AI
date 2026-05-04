@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transcription-api"
+version = "0.1.0"
+description = "Self-hosted Spanish transcription + diarization API for Sandinas meetings"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Soluciones Andinas — IA Adoption", email = "ia@sandinas.local" },
+]
+
+# Fase 1 (infra smoke test): solo dependencias para que GET /health corra.
+# Las dependencias pesadas (whisperx, pyannote.audio, torch) se agregan en Fase 2
+# cuando se implementa el pipeline real. Esto reduce el tiempo del primer build
+# de ~15 min a ~2 min y permite validar la infra sin descargar 4 GB de wheels.
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "python-multipart>=0.0.12",
+]
+
+[project.optional-dependencies]
+# Pipeline real (Fase 2). Activar con: pip install -e ".[pipeline]"
+pipeline = [
+    "whisperx>=3.8.5",
+    "pyannote.audio>=3.1.0",
+    "ffmpeg-python>=0.2.0",
+    "torch>=2.1.0",
+    "torchaudio>=2.1.0",
+]
+
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.27.0",
+    "freezegun>=1.5.0",
+    "ruff>=0.7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,71 @@
+# docker-compose.yml — transcription-api
+# Single service con GPU pass-through, volumen persistente para modelos+caché.
+# Uso: docker compose up -d
+#
+# Prerequisitos en el rig:
+# - Docker Engine 24+ con docker-compose plugin v2.20+
+# - nvidia-container-toolkit instalado y configurado
+# - GPU NVIDIA con drivers >= 535, CUDA 12.1+ compatible
+# - Archivo .env con HF_TOKEN válido (copiar desde .env.example)
+
+services:
+  transcription-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: transcription-api:latest
+    container_name: transcription-api
+    restart: unless-stopped
+
+    # Init system para evitar zombies de subprocesses (ffmpeg)
+    init: true
+
+    # GPU pass-through (compose specification, requiere docker compose v2.20+)
+    # Si la versión de compose es vieja, reemplazar por el bloque deploy.resources comentado abajo.
+    gpus: all
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    ports:
+      - "8000:8000"
+
+    env_file:
+      - .env
+
+    environment:
+      # Defaults sobreescribibles desde .env
+      DATA_DIR: ${DATA_DIR:-/data}
+      DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-es}
+      COMPUTE_TYPE: ${COMPUTE_TYPE:-float16}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+      PIPELINE_TIMEOUT_SECONDS: ${PIPELINE_TIMEOUT_SECONDS:-1800}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-86400}
+      CACHE_CLEANUP_INTERVAL_SECONDS: ${CACHE_CLEANUP_INTERVAL_SECONDS:-3600}
+
+    volumes:
+      # Modelos pre-descargados (Whisper, pyannote, alignment) — persisten entre rebuilds
+      - ./data/models:/data/models
+      # Caché temporal de transcripciones (TTL 24h por default)
+      - ./data/cache:/data/cache
+
+    # Healthcheck: GET /health debe responder 200.
+    # start_period 90s: tiempo holgado para que lifespan cargue Whisper large-v3 + pyannote en VRAM.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+    # Logging: rotación para evitar que el log llene el disco del rig
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
