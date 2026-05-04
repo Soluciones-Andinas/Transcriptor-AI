@@ -54,6 +54,8 @@ dev = [
     "ruff>=0.7.0",
     # Testing con Postgres real en contenedor efímero
     "testcontainers[postgres]>=4.8.0",
+    # Driving startup/shutdown of the ASGI app from async tests (AC-8 + AC-9)
+    "asgi-lifespan>=2.1.0",
 ]
 
 [tool.setuptools.packages.find]
