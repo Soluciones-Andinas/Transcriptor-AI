@@ -5,7 +5,7 @@ Reference docs: wiki/05_modelo_datos.md, wiki/ADR/ADR-008.md, wiki/ADR/ADR-009.m
 """
 from pathlib import Path
 
-from pydantic import Field, SecretStr, computed_field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -92,14 +92,17 @@ class Settings(BaseSettings):
     def blobs_dir(self) -> Path:
         return self.data_dir / "blobs"
 
-    # --- Computed database URL ---------------------------------------------
-    @computed_field
-    @property
-    def database_url(self) -> str:
-        """SQLAlchemy + asyncpg URL.
+    # --- Database URL builder ----------------------------------------------
+    # NOT a computed_field: doing so would put the cleartext password into
+    # `settings.model_dump()` and `repr(settings)`, leaking via any diagnostic
+    # logger or error handler. Construct the URL on demand only when handing
+    # it to the engine factory.
+    def build_database_url(self) -> str:
+        """Return the SQLAlchemy + asyncpg URL.
 
-        Uses DATABASE_URL env var if explicitly set; otherwise composes one
-        from the discrete POSTGRES_* env vars.
+        Honors `DATABASE_URL` override if set; otherwise composes from
+        discrete `POSTGRES_*` settings. The cleartext password is only
+        materialized inside this method, never stored as a public attribute.
         """
         if self.database_url_override:
             return self.database_url_override

@@ -28,7 +28,7 @@ from ..config import settings
 
 def _make_engine() -> AsyncEngine:
     return create_async_engine(
-        settings.database_url,
+        settings.build_database_url(),
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_pool_max_overflow,
         pool_pre_ping=True,
@@ -46,10 +46,22 @@ async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency: yields one AsyncSession per request, with rollback on error."""
+    """FastAPI dependency: yields one AsyncSession per request, with rollback on error.
+
+    M-11: rollback wrapped in its own try/except — if rollback itself raises
+    (e.g., connection already dead), the original business-error is preserved
+    and the rollback failure is logged separately. Without this, Python loses
+    the original traceback and the operator sees only the rollback failure.
+    """
+    import logging
+    _logger = logging.getLogger("transcription_api")
+
     async with async_session_factory() as session:
         try:
             yield session
         except Exception:
-            await session.rollback()
+            try:
+                await session.rollback()
+            except Exception:
+                _logger.exception("session_rollback_failed error_id=DB_ROLLBACK_FAILED")
             raise

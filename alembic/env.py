@@ -32,10 +32,24 @@ def _alembic_url() -> str:
 
     Priority: explicit `sqlalchemy.url` from CLI (`-x`) or .ini > settings.
     Always converted to `+psycopg` because Alembic's online mode is sync.
+
+    M-8: validates the result is a Postgres URL using a sync driver.
+    `replace('+asyncpg', '+psycopg')` is a no-op on URLs lacking that suffix
+    (e.g. bare `postgresql://`), which silently picks the SQLAlchemy default
+    driver. Catch that here so misconfigurations fail loudly.
     """
     explicit = config.get_main_option("sqlalchemy.url")
-    url = explicit if explicit else settings.database_url
-    return url.replace("+asyncpg", "+psycopg")
+    url = explicit if explicit else settings.build_database_url()
+    sync_url = url.replace("+asyncpg", "+psycopg")
+    if "+asyncpg" in sync_url:
+        raise RuntimeError(
+            f"alembic_env: failed to convert async URL to sync: {sync_url!r}"
+        )
+    if not sync_url.startswith(("postgresql+psycopg://", "postgresql+psycopg2://")):
+        raise RuntimeError(
+            f"alembic_env: expected postgresql+psycopg(2) URL, got {sync_url.split('://')[0]!r}"
+        )
+    return sync_url
 
 
 target_metadata = Base.metadata
