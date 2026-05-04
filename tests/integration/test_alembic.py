@@ -67,10 +67,10 @@ def initial_migration_text() -> str:
     migrations = sorted(VERSIONS_DIR.glob("*.py"))
     migrations = [m for m in migrations if m.name != "__init__.py"]
     assert len(migrations) >= 1, "no migration files in alembic/versions/"
-    # Initial migration is the one that creates `users` (no down_revision)
+    # Initial migration is the one that creates `users` and has no down_revision
     for m in migrations:
         text = m.read_text()
-        if "create_table" in text and '"users"' in text:
+        if "create_table('users'" in text or 'create_table("users"' in text:
             return text
     pytest.fail("could not locate initial migration creating 'users' table")
 
@@ -81,16 +81,11 @@ def test_initial_migration_creates_table(initial_migration_text, table_name):
     Spec: SPEC-capa1-postgres-orm-v1
     Criterion: AC-4 — initial migration emits op.create_table for each of the 6 tables.
     """
-    needle = f'"{table_name}"'
-    assert needle in initial_migration_text, (
-        f"migration must reference table {table_name}"
+    quoted_single = f"create_table('{table_name}'"
+    quoted_double = f'create_table("{table_name}"'
+    assert quoted_single in initial_migration_text or quoted_double in initial_migration_text, (
+        f"migration must call op.create_table('{table_name}')"
     )
-    # Sanity-check that it's referenced as the create_table target, not just FK
-    assert f'create_table(\n        "{table_name}"' in initial_migration_text \
-        or f"create_table('{table_name}'" in initial_migration_text \
-        or f'create_table("{table_name}"' in initial_migration_text, (
-            f"migration must call op.create_table('{table_name}')"
-        )
 
 
 def test_initial_migration_uses_naming_convention(initial_migration_text):
