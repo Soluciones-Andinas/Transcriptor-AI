@@ -189,6 +189,27 @@ Toda RF que toca datos del user debe tener al menos un test que verifica per-use
 | RF-IMG-03 | TP-IMG-03-neg-02 | attach_image cross-user → 404 |
 | RF-MCP-02 | TP-MCP-02-neg-01 | start_transcription con upload ajeno → 404 |
 
+## Cobertura de infraestructura — Capa 1 (data layer) ✓ Completada 2026-05-04
+
+Capa 1 es infraestructura cross-cutting; no mapea 1:1 a un RF funcional. Su cobertura vive en `tests/integration/` con trazabilidad explícita al spec canónico `docs/sesiones/2026-04-30-capa1-postgres-orm-spec.md` (15 ACs + 5 ERR + 3 ALT). Cada test arranca con docstring `Spec: SPEC-capa1-postgres-orm-v1` + criterio.
+
+| Item | Cobertura | Tests |
+|---|---|---|
+| Schema columnar (uuid, jsonb, bytea, numeric(10,2), timestamptz) per `05_modelo_datos.md` §2 | `test_db_schema.py` | 30 parametrizados contra `information_schema.columns` |
+| Indexes (GIN tsvector spanish parcial, partial UNIQUE, composites con DESC) | `test_db_indexes.py` | 8 contra `pg_indexes` |
+| Constraint UNIQUE parcial — at-most-one bearer activo (RF-AUTH-07) | `test_db_constraints.py` | 2 + 1 race concurrente |
+| Spanish FTS via GIN (RF-MCP-05) | `test_db_constraints.py` | 3 (match, stemmer, no-match) |
+| Cascade delete user → 5 tablas + bystander untouched (RF-MCP-09) | `test_db_per_user_scoping.py` | 1 multi-row con bystander |
+| Per-user scoping enforcement ([ADR-014](ADR/ADR-014.md)) — invariante para RF-MCP-04..09, RF-IMG-* | `test_scoping_enforcement.py` | 8 (5 modelos with-user-id + bypass + users-no-filter) |
+| Lifespan + `/health` ERR-1 (DB down sin crash) + ERR-2 (pool 503 + DB_POOL_EXHAUSTED) | `test_lifespan.py` + `test_health_endpoint.py` | 6 |
+| Alembic config + drift detection + URL conversion ERR-5 | `test_alembic.py` | 8 |
+| GPU detection (CUDA NVIDIA / MPS Apple / CPU) | `test_gpu_detection.py` | 5 |
+| Config security: password no leak en `model_dump()` / `repr()` | `test_config_security.py` | 3 |
+| CRUD round-trip + onupdate + JSONB nested + Decimal preservation | `test_db_models_crud.py` | 9 |
+| E2E compose static contract + live smoke (opt-in `pytest -m e2e`) | `tests/e2e/test_compose_e2e.py` | 3 static + 1 live |
+
+**Total Capa 1**: 95 tests verde + 4 e2e opt-in. Cobertura review fixes (auditoría 5 agentes 2026-05-04): 22/22 in-scope items.
+
 ## Estado de la matriz
 
 | Validación | Estado |
@@ -198,17 +219,18 @@ Toda RF que toca datos del user debe tener al menos un test que verifica per-use
 | Cada `error_code` tiene cobertura | ✓ |
 | Cada flow path tiene cobertura E2E | ✓ |
 | Cada RF que toca datos tiene test cross-user | ✓ |
-| Cobertura objetivo de líneas (≥80%) | A medir tras implementación |
+| Capa 1 (infra) testeada con trazabilidad a spec | ✓ — 95 tests, ver sección anterior |
+| Cobertura objetivo de líneas (≥80%) | A medir tras Capa 2 |
 
 ## Próximos pasos
 
 1. Implementar el código fuente siguiendo el orden de capas en `02_arquitectura.md`:
-   - Capa 1: Postgres + modelos SQLAlchemy + Alembic.
-   - Capa 2: Auth (RFs AUTH-*) + middleware MCP (RF-MCP-11).
+   - **Capa 1: Postgres + modelos SQLAlchemy + Alembic. ✓ Completada 2026-05-04**, ver sección anterior.
+   - Capa 2: Auth (RFs AUTH-*) + middleware MCP (RF-MCP-11). El middleware seteará `session.info["user_id"]` que activa el listener de [ADR-014](ADR/ADR-014.md). Encriptación de tokens MS Entra (ALT-3 de Capa 1, deferida).
    - Capa 3: UI mínima (RFs UI-*).
    - Capa 4: Pipeline real (RFs TRX-* y CACHE-*).
    - Capa 5: REST endpoints upload (RF-MCP-03).
    - Capa 6: MCP Server tools y resources (RF-MCP-01..10).
    - Capa 7: IMG (RFs IMG-*).
 2. Implementar tests siguiendo esta matriz, idealmente TDD (test rojo → código → test verde).
-3. Cerrar trazabilidad con la skill `ps-trazabilidad` antes de mergear.
+3. Cerrar trazabilidad con la skill `ps-trazabilidad` antes de mergear cada capa.
