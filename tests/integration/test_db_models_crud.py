@@ -119,3 +119,75 @@ async def test_crud_upload_session(session):
     assert fetched.status == "requested"  # server default
     assert fetched.bearer_id == bearer.id
     assert fetched.expires_at is not None
+
+
+async def test_transcription_duration_round_trips_as_decimal(session):
+    """
+    Review fix H-2: Numeric(10,2) must round-trip as Decimal, not float.
+    Mixed Decimal/float arithmetic in consumer code raises TypeError, so this
+    invariant matters beyond a docstring.
+    """
+    from decimal import Decimal
+
+    user = await make_user(session)
+    tr = await make_transcription(session, user_id=user.id, duration_seconds=123.45)
+    fetched = (
+        await session.execute(select(Transcription).where(Transcription.id == tr.id))
+    ).scalar_one()
+    assert isinstance(fetched.duration_seconds, Decimal)
+    assert fetched.duration_seconds == Decimal("123.45")
+
+
+async def test_transcription_jsonb_round_trips_nested(session):
+    """
+    Review fix (pr-test-analyzer #3): non-empty nested JSONB must round-trip
+    losslessly. The empty `{"segments": []}` case in factories never exercises
+    nested objects, floats, or unicode in keys/values.
+    """
+    user = await make_user(session)
+    nested_segments = {
+        "segments": [
+            {
+                "start": 0.0,
+                "end": 1.5,
+                "speaker": "S1",
+                "text": "hola, ¿cómo estás?",
+                "words": [{"word": "hola", "start": 0.0, "end": 0.5}],
+            },
+            {"start": 1.5, "end": 3.0, "speaker": "S2", "text": "bien — muy bien"},
+        ]
+    }
+    tr = await make_transcription(session, user_id=user.id)
+    tr.segments = nested_segments
+    await session.flush()
+    fetched = (
+        await session.execute(select(Transcription).where(Transcription.id == tr.id))
+    ).scalar_one()
+    assert fetched.segments == nested_segments
+    # Spot-check unicode + float preservation:
+    assert fetched.segments["segments"][0]["text"] == "hola, ¿cómo estás?"
+    assert fetched.segments["segments"][0]["start"] == 0.0
+
+
+async def test_oauth_token_updated_at_advances_on_update(session):
+    """
+    Review fix H-7: OAuthToken.updated_at must advance on UPDATE (onupdate=now()).
+    Without onupdate, server_default only fires on INSERT and the field freezes
+    forever — Capa 2 token rotation would silently store stale timestamps.
+    """
+    import asyncio
+
+    user = await make_user(session)
+    tok = await make_oauth_token(session, user_id=user.id)
+    initial_updated_at = tok.updated_at
+
+    # Real-time tick — server-side now() has microsecond precision; sleep 10ms.
+    await asyncio.sleep(0.01)
+
+    tok.ms_access_token_encrypted = b"\xff\xfe"
+    await session.flush()
+    await session.refresh(tok)
+
+    assert tok.updated_at > initial_updated_at, (
+        "OAuthToken.updated_at must advance on UPDATE — onupdate=func.now() missing?"
+    )

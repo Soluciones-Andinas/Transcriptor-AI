@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, Text, Uuid, func, text
@@ -34,7 +35,9 @@ class Transcription(Base):
     audio_hash: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     original_filename: Mapped[str] = mapped_column(Text, nullable=False)
     original_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    duration_seconds: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    # H-2: Numeric(10,2) returns Decimal at runtime (asyncpg + SQLAlchemy);
+    # using Mapped[float] would lie to mypy and break Decimal-aware arithmetic.
+    duration_seconds: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     language: Mapped[str] = mapped_column(Text, nullable=False)
     num_speakers: Mapped[int] = mapped_column(Integer, nullable=False)
     text_content: Mapped[str] = mapped_column("text", Text, nullable=False)

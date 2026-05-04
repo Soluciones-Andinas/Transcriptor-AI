@@ -37,8 +37,15 @@ class OAuthToken(Base):
         nullable=False,
         server_default=func.now(),
     )
+    # H-7: server_default fires only on INSERT. Without onupdate, `updated_at`
+    # would freeze at first INSERT, contradicting wiki/05_modelo_datos.md §2's
+    # "cuándo se actualizó". Capa 2's token rotation flow depends on this
+    # field being current. Note: clock_timestamp() (NOT now()) — Postgres
+    # `now()` returns transaction-start, so two UPDATEs in one transaction
+    # would share a timestamp; clock_timestamp() returns wall-time per call.
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+        onupdate=func.clock_timestamp(),
     )
