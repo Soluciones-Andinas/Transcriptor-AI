@@ -73,3 +73,10 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# `e2e` tests drive `docker compose` and take 60-90s. Excluded from default
+# pytest run; opt in with `pytest -m e2e`.
+addopts = "-m 'not e2e'"
+markers = [
+    "requires_docker: test needs a running Docker daemon (testcontainers).",
+    "e2e: end-to-end smoke against `docker compose up` (slow, opt-in).",
+]

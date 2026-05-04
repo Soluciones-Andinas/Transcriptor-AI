@@ -32,8 +32,12 @@ COPY pyproject.toml ./
 RUN pip install --upgrade pip setuptools wheel \
     && pip install -e .
 
-# Copiar código
+# Copiar código y configuración de Alembic
 COPY src/ ./src/
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
+COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Crear DATA_DIR (el volumen lo monta encima en runtime, pero esto cubre el caso sin volumen)
 RUN mkdir -p /data/models /data/cache
@@ -43,4 +47,5 @@ EXPOSE 8000
 # Init system para limpiar zombies (subprocesses ffmpeg)
 STOPSIGNAL SIGTERM
 
-CMD ["uvicorn", "transcription_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-config", "/app/src/transcription_api/logging.json"]
+# Capa 1 ALT-1: entrypoint corre alembic upgrade head antes de uvicorn.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
