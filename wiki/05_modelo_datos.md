@@ -43,7 +43,7 @@ La persistencia se divide en **dos capas** según [ADR-008](ADR/ADR-008.md):
 | `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | Primer login |
 | `last_login_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | Último login |
 
-Index: `idx_users_email` (UNIQUE), `idx_users_microsoft_oid` (UNIQUE).
+Constraints UNIQUE (Postgres las implementa como índices únicos visibles en `pg_indexes`): `uq_users_email`, `uq_users_microsoft_oid`. Convención: `uq_*` para constraints, `idx_*` para índices propiamente dichos.
 
 ### Tabla `oauth_tokens`
 
@@ -59,7 +59,7 @@ Tokens de Microsoft Entra ID encriptados. Refresh token rota; access token corta
 | `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | |
 | `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | |
 
-Index: `idx_oauth_tokens_user_id` (UNIQUE — un solo token activo por user).
+Constraint UNIQUE: `uq_oauth_tokens_user_id` — un solo token activo por user.
 
 ### Tabla `mcp_bearers`
 
@@ -75,7 +75,7 @@ Bearer tokens emitidos por la app para que el Claude del usuario consuma el MCP 
 | `last_used_at` | `TIMESTAMPTZ` | NULL | Actualizado a cada request MCP |
 | `revoked_at` | `TIMESTAMPTZ` | NULL | NULL = activo; valor = revocado |
 
-Index: `idx_mcp_bearers_user_id`, `idx_mcp_bearers_token_hash` (UNIQUE).
+Index: `idx_mcp_bearers_user_id`. Constraint UNIQUE: `uq_mcp_bearers_token_hash`. Índice parcial UNIQUE: `uq_mcp_bearers_active_per_user` sobre `(user_id) WHERE revoked_at IS NULL` — al menos un bearer activo por user (RF-AUTH-07).
 
 ### Tabla `transcriptions`
 
@@ -100,7 +100,7 @@ Histórico persistente. Una entrada por cada `start_transcription` exitoso. No t
 Index:
 - `idx_transcriptions_user_created` (`user_id`, `created_at DESC`) WHERE `deleted_at IS NULL`.
 - `idx_transcriptions_audio_hash` (`audio_hash`).
-- `idx_transcriptions_text_fts` GIN (`to_tsvector('spanish', text)`) — full-text search.
+- `idx_transcriptions_text_fts` GIN (`to_tsvector('spanish', text)`) WHERE `deleted_at IS NULL` — full-text search parcial, alineado con el filtro de `idx_transcriptions_user_created` para que el planner combine ambos índices sin recheck sobre filas borradas.
 
 ### Tabla `images`
 
@@ -142,7 +142,7 @@ Sesiones efímeras de upload binario. Vinculan el `request_upload_url` (tool MCP
 | `consumed_at` | `TIMESTAMPTZ` | NULL | Cuando se llamó `start_transcription` o `attach_image` |
 
 Index:
-- `idx_upload_sessions_nonce` (UNIQUE).
+- `uq_upload_sessions_nonce` (UNIQUE constraint).
 - `idx_upload_sessions_status_expires` (`status`, `expires_at`) — para cleanup de expirados.
 
 ## 3. Entidad `TranscriptionResult` (JSON devuelto por MCP)

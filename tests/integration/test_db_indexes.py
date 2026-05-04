@@ -24,7 +24,8 @@ pytestmark = pytest.mark.requires_docker
 EXPECTED_INDEXES = [
     # transcriptions
     ("idx_transcriptions_user_created", "transcriptions", "btree", "deleted_at IS NULL"),
-    ("idx_transcriptions_text_fts",     "transcriptions", "gin",   None),
+    # H-8: FTS index is partial on deleted_at IS NULL (review fix).
+    ("idx_transcriptions_text_fts",     "transcriptions", "gin",   "deleted_at IS NULL"),
     ("idx_transcriptions_audio_hash",   "transcriptions", "btree", None),
     # mcp_bearers — both global UNIQUE on token_hash AND partial UNIQUE on (user_id) WHERE active
     ("uq_mcp_bearers_token_hash",       "mcp_bearers",    "btree", None),

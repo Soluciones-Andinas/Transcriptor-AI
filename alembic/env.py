@@ -71,7 +71,17 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode against a live DB."""
+    """Run migrations in 'online' mode against a live DB.
+
+    H-5 hardening:
+    - `transaction_per_migration=True` so each revision runs in its own
+      transaction. Without this, multi-statement migrations that mix DDL
+      with `op.execute()` raw SQL can leave the schema half-applied.
+    - `pg_advisory_xact_lock` taken before applying any migrations. Two
+      containers booting concurrently both call `alembic upgrade head`;
+      without this lock they race, one fails. The lock auto-releases at
+      transaction end, regardless of success/failure.
+    """
     section = config.get_section(config.config_ini_section, {})
     section["sqlalchemy.url"] = _alembic_url()
     connectable = engine_from_config(
@@ -79,15 +89,42 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    # Stable lock key: chosen once, shared across all containers. The bigint
+    # identifier is project-specific; collisions across unrelated projects
+    # sharing a Postgres cluster are not a concern here (single-tenant DB).
+    # Stable lock key for cross-container coordination on `alembic upgrade head`.
+    ALEMBIC_LOCK_KEY = 0x7361_6E64_696E_6173  # 'sandinas' as ASCII hex
+    from sqlalchemy import text as _sql_text
+
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-            compare_server_default=True,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+        # Acquire the advisory lock in a committed transaction. pg_advisory_lock
+        # is session-level (not transaction-level), so committing the wrapper
+        # transaction does NOT release the lock — it just clears the implicit
+        # transaction state so Alembic's per-migration transactions can BEGIN
+        # cleanly.
+        with connection.begin():
+            connection.execute(_sql_text("SELECT pg_advisory_lock(:k)"), {"k": ALEMBIC_LOCK_KEY})
+
+        try:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_type=True,
+                compare_server_default=True,
+                transaction_per_migration=True,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+        finally:
+            # Best-effort lock release; auto-releases on connection close anyway.
+            try:
+                with connection.begin():
+                    connection.execute(
+                        _sql_text("SELECT pg_advisory_unlock(:k)"),
+                        {"k": ALEMBIC_LOCK_KEY},
+                    )
+            except Exception:
+                pass
 
 
 if context.is_offline_mode():
