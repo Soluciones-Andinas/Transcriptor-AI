@@ -81,6 +81,60 @@ async def get_current_user_web(
     return user
 
 
-async def get_current_user_mcp() -> User:
-    """Placeholder — real impl in Batch 6 (T18 / AC-17)."""
-    raise HTTPException(status_code=501, detail="get_current_user_mcp not implemented yet")
+async def get_current_user_mcp(
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+) -> User:
+    """Resolve the authenticated user from the `Authorization: Bearer ...` header.
+
+    Used by all Capa 6 MCP routes (tools/resources). Failure modes (401
+    AUTH_NOT_AUTHENTICATED):
+    - Header missing.
+    - Header not in `Bearer <plaintext>` form.
+    - Plaintext empty.
+    - Plaintext hash not found in mcp_bearers (no row with matching token_hash).
+    - Bearer is revoked (revoked_at NOT NULL).
+
+    On success: sets `db.info["user_id"]` to activate ADR-014 per-user scoping
+    on every subsequent ORM query in this request's session. This is THE
+    enforcement point — without it, a single forgotten `WHERE user_id = X`
+    in any tool/resource query becomes a cross-tenant data leak.
+
+    Side effect: bumps `mcp_bearers.last_used_at = clock_timestamp()` so
+    the operator can audit bearer activity.
+    """
+    from .mcp_bearer import verify_bearer
+
+    auth_header = request.headers.get("authorization")
+    if not auth_header:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error_code": "AUTH_NOT_AUTHENTICATED", "reason": "missing Authorization header"},
+        )
+
+    parts = auth_header.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error_code": "AUTH_NOT_AUTHENTICATED", "reason": "Authorization header must be `Bearer <token>`"},
+        )
+
+    plaintext = parts[1].strip()
+    if not plaintext:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error_code": "AUTH_NOT_AUTHENTICATED", "reason": "empty bearer token"},
+        )
+
+    user = await verify_bearer(db, plaintext)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error_code": "AUTH_NOT_AUTHENTICATED", "reason": "bearer not found or revoked"},
+        )
+
+    # Arm the ADR-014 listener for the rest of the request's queries.
+    db.info["user_id"] = user.id
+    # Persist the last_used_at bump that verify_bearer queued.
+    await db.commit()
+    return user
