@@ -26,10 +26,11 @@ def test_state_cookie_roundtrip_and_expiry():
     assert isinstance(token, str)
     assert verify_state(token) == payload
 
-    # max_age=0 forces immediate expiry — itsdangerous treats now() vs sign-time
-    # as already past TTL.
+    # max_age=-1 forces expiry: itsdangerous compares `age > max_age` strictly,
+    # so within the same second age=0 and 0 > 0 is False (max_age=0 won't fire).
+    # max_age=-1 makes 0 > -1 True → SignatureExpired → wrapped as StateExpired.
     with pytest.raises(StateExpired):
-        verify_state(token, max_age_seconds=0)
+        verify_state(token, max_age_seconds=-1)
 
 
 def test_state_cookie_tamper_raises_invalid():
