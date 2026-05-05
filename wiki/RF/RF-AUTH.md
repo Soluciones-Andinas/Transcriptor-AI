@@ -71,6 +71,7 @@ Sin errores propios; `RF-AUTH-05` cubre fallas de comunicación.
 
 - **User ya logueado** (cookie `session` válida): `GET /auth/login` redirect directo a `/mcp-setup` sin iniciar flow.
 - **Doble click en login**: cada call genera nuevo state y verifier; el más reciente prevalece (cookie pisa).
+- **Multi-tab**: si el user abre `/auth/login` en una segunda tab/ventana mientras la primera todavía está esperando consent en Microsoft, la cookie `oauth_state` de la segunda tab **pisa** la de la primera (mismo nombre, path, domain). Al volver del callback con el `state` query param de la primera tab, el match contra la cookie actual falla → `AUTH_INVALID_STATE` (RF-AUTH-02). Comportamiento esperado y documentado: la última `/auth/login` gana, las anteriores deben re-iniciar el flow. No es un bug; es la consecuencia natural de tener una cookie nombrada per-domain.
 
 ### Data Model Impact
 
