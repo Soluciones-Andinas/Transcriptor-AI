@@ -242,6 +242,16 @@ async def test_callback_subsequent_login_updates_only(client, session):
 
     tokens = (await session.execute(select(OAuthToken).where(OAuthToken.user_id == refreshed_user.id))).scalars().all()
     assert len(tokens) == 1  # UPDATE not duplicate
+    # H-2: the UPDATEd ciphertext must decrypt to the new MS plaintexts.
+    # Without this assertion the test passed even if the UPDATE wrote stale
+    # values, encrypted them with the wrong nonce, or skipped re-encryption.
+    from transcription_api.auth.crypto import decrypt_token
+    refreshed_tok = tokens[0]
+    assert decrypt_token(refreshed_tok.ms_access_token_encrypted) == "NEW_ACCESS"
+    assert decrypt_token(refreshed_tok.ms_refresh_token_encrypted) == "NEW_REFRESH"
+    assert refreshed_tok.ms_access_token_encrypted != b"OLD_ACCESS", (
+        "UPDATE must replace, not append, the access token ciphertext"
+    )
 
     bearers = (await session.execute(select(McpBearer).where(McpBearer.user_id == refreshed_user.id))).scalars().all()
     assert len(bearers) == 1  # no new row at subsequent login (RF-AUTH-04)

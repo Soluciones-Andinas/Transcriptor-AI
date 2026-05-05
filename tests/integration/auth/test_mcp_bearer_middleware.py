@@ -182,40 +182,45 @@ async def test_mcp_bearer_activates_per_user_scoping(client, session):
 
     This is the LOAD-BEARING invariant for Capa 6. If it breaks, MCP tools
     leak between tenants regardless of which query the developer writes.
+
+    H-1: deepened with three users instead of two — a 2-user test would
+    accept a buggy listener that returned `(user_id IN (alice, bob))` for
+    any bearer. With three users the test fails for that bug class.
     """
     from tests.factories import make_bearer, make_transcription, make_user
     from transcription_api.auth.mcp_bearer import generate_bearer
 
-    # Setup: 2 users, 2 bearers, 2 transcriptions (one per user).
+    # Setup: 3 users, 3 bearers, 3 transcriptions (one per user).
     alice = await make_user(session, email="alice-iso@x")
     bob = await make_user(session, email="bob-iso@x")
+    carol = await make_user(session, email="carol-iso@x")
 
     alice_pt, alice_hash = generate_bearer()
     bob_pt, bob_hash = generate_bearer()
+    carol_pt, carol_hash = generate_bearer()
     await make_bearer(session, user_id=alice.id, token_hash=alice_hash)
     await make_bearer(session, user_id=bob.id, token_hash=bob_hash)
+    await make_bearer(session, user_id=carol.id, token_hash=carol_hash)
 
     await make_transcription(session, user_id=alice.id, audio_hash="hash-alice-only")
     await make_transcription(session, user_id=bob.id, audio_hash="hash-bob-only")
+    await make_transcription(session, user_id=carol.id, audio_hash="hash-carol-only")
     await session.commit()
 
-    # Alice's bearer → sees ONLY hash-alice-only.
-    r_alice = await client.get(
-        "/_test_mcp_user_data", headers={"authorization": f"Bearer {alice_pt}"},
-    )
-    assert r_alice.status_code == 200, r_alice.text
-    assert r_alice.json()["audio_hashes"] == ["hash-alice-only"], (
-        f"alice's bearer leaked cross-user data: {r_alice.json()}"
-    )
-
-    # Bob's bearer → sees ONLY hash-bob-only.
-    r_bob = await client.get(
-        "/_test_mcp_user_data", headers={"authorization": f"Bearer {bob_pt}"},
-    )
-    assert r_bob.status_code == 200, r_bob.text
-    assert r_bob.json()["audio_hashes"] == ["hash-bob-only"], (
-        f"bob's bearer leaked cross-user data: {r_bob.json()}"
-    )
+    # Each bearer must see EXACTLY its own user's data, never another's.
+    expected = {
+        alice_pt: "hash-alice-only",
+        bob_pt: "hash-bob-only",
+        carol_pt: "hash-carol-only",
+    }
+    for token, expected_hash in expected.items():
+        r = await client.get(
+            "/_test_mcp_user_data", headers={"authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["audio_hashes"] == [expected_hash], (
+            f"bearer leaked cross-user data: token={expected_hash} got={r.json()}"
+        )
 
     # No bearer → 401, no data exposed.
     r_anon = await client.get("/_test_mcp_user_data")

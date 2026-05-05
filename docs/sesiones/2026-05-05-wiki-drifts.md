@@ -203,24 +203,217 @@ Patrón Node-style "copy manifest → install deps → copy code" para maximizar
 
 ---
 
+## Categoría 7 — Drifts del review multi-agente Capa 2 (2026-05-05)
+
+> Las siguientes drifts surgieron de la auditoría multi-agente sobre Capa 2
+> (auth Microsoft Entra + middleware MCP). Aplicación de fixes en commits
+> de los grupos 1-6 del fix plan. Por instrucción del usuario ("anota
+> wiki drifts para hacer correciones luego") las correcciones al wiki se
+> defieren a una sesión dedicada. Estas entradas son la lista accionable.
+
+### D-013 🟠 RF-AUTH-02 status code: spec dice 200, implementación devuelve 302
+
+**Asumido (RF-AUTH-02 / SPEC-capa2-auth-msentra-v1)**: la response a `GET /auth/callback` debe ser HTTP 200 con `Set-Cookie: session=...` y body con shape `{ user, bearer, mcp_url }`.
+
+**Reality**: la implementación devuelve `HTTP 302 → /mcp-setup` con `Set-Cookie: session=...` + flash. Esto es el patrón estándar de OAuth web (post-callback redirect a la SPA), preferido sobre 200-with-body porque:
+1. Si el cliente sigue redirects, aterriza en `/mcp-setup` con cookies seteadas listas para `GET /auth/me`.
+2. Body 200 al callback obliga al SPA a leer JSON de la respuesta del callback, que es awkward — el callback típicamente se navega como página, no se fetchea como API.
+
+**Resolución elegida (CR-6, instrucción explícita Franco)**: mantener 302. Wiki debe corregirse para reflejar el contrato real.
+
+**Acción pendiente sobre wiki**:
+- `wiki/RF/RF-AUTH.md` RF-AUTH-02: cambiar el status code de respuesta del callback de 200 a 302 con Location: /mcp-setup. Documentar que el body shape `{ user, bearer, mcp_url }` ahora se sirve por `GET /auth/me` (RF-AUTH-06), no por el callback. Tests integration ya validan 302 + Location.
+- `wiki/06_matriz_pruebas_RF.md`: actualizar la fila de AC-8 si se refiere al status del callback.
+
+**Lección**: specs deberían modelar OAuth flows como secuencia de redirects, no como una sola request/response. El "happy path" de OAuth es naturalmente 3+ saltos.
+
+---
+
+### D-014 🔴 ADR-014 listener: contrato cambió de fail-open a fail-closed (CR-5)
+
+**Asumido (ADR-014 / SPEC-capa1-postgres-orm-v1 review S-1)**: el listener `do_orm_execute` inyecta `WHERE user_id = X` cuando `session.info["user_id"]` está armado. Cuando NO está armado, el listener es no-op (queries retornan todas las filas — patrón "admin/migration context").
+
+**Reality post review**: el contrato fail-open es un silent-leak hazard. Si en alguna Capa futura se olvida el `Depends(get_current_user_*)` en una ruta, queries para-user-models retornan TODAS las filas. El reviewer multi-agente flaggeó esto como CR-5.
+
+**Resolución (esta sesión)**: listener pasa a FAIL-CLOSED. Una query SELECT/UPDATE/DELETE contra un per-user model cuyo session no tiene `user_id` armado **ni** `scoping_bypass=True` → raise `ScopingNotArmedError`. El bypass se hace ahora vía `with bypass_scoping(session): ...` (S-5) en lugar de `session.info["scoping_bypass"] = True` inline.
+
+**Sitios que ahora usan `bypass_scoping`**:
+- `auth/dependencies.py::get_current_user_web` (lookup del User por session.sub).
+- `auth/mcp_bearer.py::verify_bearer` (lookup del bearer por hash).
+- `auth/routes.py::callback` (todo el upsert pre-armado).
+- `tests/conftest.py::session` (armado una vez para todo el lifetime de la fixture).
+- `tests/integration/test_scoping_enforcement.py` reescrito para el nuevo contrato.
+
+**Acción pendiente sobre wiki**:
+- Crear ADR-015 `Listener fail-closed por defecto` con status `Reemplaza ADR-014`. ADR-014 mantiene su contenido pero status pasa a `Reemplazada`. El usuario suspendió la regla de inmutabilidad para esta etapa solo-dev (D-009), pero esta superseding sí merece ADR formal porque cambia un invariante crítico de seguridad.
+- `wiki/05_modelo_datos.md`: párrafo del listener actualizado al nuevo contrato.
+
+**Lección**: defaults de seguridad deben fail-closed, no fail-open. El reviewer multi-agente capturó esto exactamente porque su contexto era zero (no había sido condicionado a la lógica original) — argumento adicional a favor del review sin context-poisoning.
+
+---
+
+### D-015 🟡 Pool reuse leak risk: `db.info["user_id"]` no se limpiaba post-request (CR-4)
+
+**Asumido (Capa 1 batch 5)**: `async_session_factory()` crea AsyncSession nueva por request. Como las AsyncSessions no son pooled (solo las connections lo son), `session.info` no podría leakear entre requests.
+
+**Reality**: el invariante se mantiene HOY pero no es robusto a refactors. Si alguien introdujera caching de sessions (ej. una long-lived session inyectada en un job o test), `info["user_id"]` se heredaría del request previo.
+
+**Resolución (esta sesión)**: `get_session()` en `db/session.py` ahora limpia `db.info["user_id"]` y `db.info["scoping_bypass"]` en `finally`, defensa-en-profundidad. Costo: ~zero. Beneficio: hace explícito el contrato "session.info pertenece a un request, no se hereda".
+
+**Acción pendiente sobre wiki**: ninguna (mejora interna, no cambia contratos públicos).
+
+**Lección**: defensive cleanup en boundaries (request teardown, transaction commit) protege contra refactors futuros aunque hoy no sea necesario.
+
+---
+
+### D-016 🟡 RF-AUTH-01 multi-tab: caso no especificado (S-6)
+
+**Asumido (RF-AUTH-01)**: usuario inicia /auth/login en una tab, completa MS Entra, vuelve al callback con cookies seteadas.
+
+**Reality**: ¿qué pasa si abre /auth/login en TAB A, queda en MS Entra, y luego abre /auth/login en TAB B? La cookie `oauth_state` de B reemplaza la de A (mismo path / domain / name). Cuando A vuelve del callback con su state-param, no matchea la cookie ahora-de-B → AUTH_INVALID_STATE.
+
+**Comportamiento actual**: ya está cubierto correctamente (state mismatch redirige a login con error). Pero el spec no lo documenta como caso esperado.
+
+**Acción pendiente sobre wiki**:
+- `wiki/RF/RF-AUTH.md` RF-AUTH-01: añadir sección "Multi-tab" explicando que la última /auth/login gana la cookie, las anteriores fallarán con AUTH_INVALID_STATE al volver. Usuario debe re-iniciar el flow.
+
+**Lección**: especificar comportamiento bajo concurrencia del usuario en el cliente (multi-tab, multi-window) es parte del contrato funcional, no un edge case de implementación.
+
+---
+
+### D-017 🟡 ALT-1 logout no revoca bearer: requisito UI no documentado (S-3)
+
+**Asumido (ALT-1 SPEC-capa2)**: logout limpia cookie web pero NO revoca el MCP bearer. Razón: el user puede estar usándolo desde Claude Desktop (sin browser).
+
+**Reality**: este flujo es invisible al usuario en la UI actual. Si hace logout pensando "estoy completamente cerrando sesión", no entiende que el bearer sigue activo. Un atacante que robó el bearer aún tiene acceso después del logout.
+
+**Acción pendiente sobre wiki**: añadir RF-AUTH-08 "Banner UI sobre estado del bearer en /mcp-setup y /auth/me". Mensaje sugerido:
+> "Tu MCP bearer sigue activo después del logout web. Para revocarlo, usá `POST /auth/regenerate-mcp-token` o el botón 'Revocar bearer' en /mcp-setup."
+
+Esto es trabajo de capa UI futura; no bloquea Capa 2.
+
+**Lección**: cuando hay separación bearer-vs-cookie con TTLs distintos, el usuario necesita feedback visual del estado de cada uno. La spec funcional debe modelar el contrato de UI, no solo el de backend.
+
+---
+
+### D-018 🟡 Capa 6 (MCP) contract doc inexistente (S-2)
+
+**Asumido**: Capa 6 tendrá su propio set de RFs cuando se diseñe.
+
+**Reality**: ya hay decisiones tomadas en Capa 2 que dependen del contrato MCP futuro:
+- `mcp_url` field en /auth/me apunta a `${PUBLIC_BASE_URL}/mcp` (M-3).
+- Bearer scope: per-user, no per-tool, no per-resource.
+- Per-user scoping listener (ADR-014/015) asume Capa 6 hace queries ORM normales.
+
+**Acción pendiente sobre wiki**: crear stub `wiki/RF/RF-MCP-00.md` con el contract base (path, auth scheme, scoping, tool naming). No es completo — es un anchor para que /auth/me y middleware tests dejen de quedar como referencias colgantes.
+
+**Lección**: cuando una capa hace forward references a otra, conviene crear un stub spec en la otra capa antes de cerrar la primera. Reduce ambigüedades.
+
+---
+
+### D-019 🟢 Encryption key rotation no implementada (S-1)
+
+**Asumido**: `OAUTH_TOKEN_ENC_KEY` es un único secreto AES-256-GCM rotado raramente.
+
+**Reality**: en el flujo actual, rotar la key requiere desencriptar y re-encriptar todos los `oauth_tokens.ms_*_encrypted` en una migración. Si la key se compromete y hay que rotar fast, hay que coordinar app-down + migration window.
+
+**Acción pendiente (estratégica)**: prefijar el ciphertext con un key-id corto (e.g., 1 byte), permitir múltiples keys activas en `Settings.OAUTH_TOKEN_ENC_KEYS` (versionado), encrypt usa la primera, decrypt prueba todas. Rotación entonces es: agregar nueva key, dejar vieja para legacy ciphertexts, eventualmente migrar y descartar la vieja.
+
+**Cuándo**: cuando haya ≥1 incidente de rotación operativa o auditoría externa lo pida. No urgente.
+
+**Lección**: secretos versionados no son sobre-ingeniería si el operacional lo va a necesitar; pero pueden esperar al primer pinchazo si el blast radius es bajo (auth tokens MS, no datos del cliente).
+
+---
+
+### D-020 🟢 last_used_at throttle no implementado (S-7)
+
+**Asumido**: cada hit a `/_test_mcp_*` o cualquier ruta MCP futuro UPDATE-ea `mcp_bearers.last_used_at`.
+
+**Reality**: bajo carga (Capa 6 con MCP loop interactivo) cada llamada genera un UPDATE a la misma row. Postgres serializa, hay row-level locks, escalable pero no eficiente.
+
+**Acción pendiente (estratégica)**: throttle a "actualizar last_used_at solo si > 5 min desde la última". Implementación: comparar `now() - last_used_at > 300s` antes de hacer el UPDATE.
+
+**Cuándo**: cuando Capa 6 muestre tasa real de calls/segundo. No urgente para Capa 2.
+
+**Lección**: side-effects de auditoría (last_used_at, last_login_at) escalan O(N) con request rate. Throttling en boundary del request hits acceptable accuracy con una fracción del costo.
+
+---
+
+### D-021 🟡 Test routes pollution: prod app mutada en `_register_test_routes_once` (H-7)
+
+**Asumido (Capa 2 Batch 6)**: registrar rutas test-only `/_test_mcp_*` en la prod app es fine porque el prefijo `_test_` es no-colisionable y `include_in_schema=False` las esconde de OpenAPI.
+
+**Reality**: la mutación de la prod app en import-time del test module:
+1. Hace que los tests dependan del orden de import (el primer import registra, los siguientes son no-op).
+2. Pollutiona la prod app aunque los tests no se hayan corrido para Capa 6 (cualquier inspección de `app.routes` post-pytest las verá).
+3. Hace impossible testear con una prod app "limpia" en otro test.
+
+**Acción pendiente (refactor menor)**: en lugar de mutar la prod app, crear un sub-app fixture per-test:
+```python
+@pytest.fixture
+async def mcp_test_app():
+    sub_app = FastAPI()
+    sub_app.include_router(...)
+    yield sub_app
+```
+y montar en una mini app con la dependencia `Depends(get_current_user_mcp)`.
+
+**Cuándo**: pre-Capa 6 (antes de añadir más test routes). Trackear como follow-up.
+
+**Lección**: tests que mutan singletons de prod son una bomba de tiempo. Sub-app fixtures son fáciles, isolan, y permiten parallel pytest sin races.
+
+---
+
+### D-022 🟢 Callback handler god-function: extracción a service deferida (S-4)
+
+**Asumido**: el callback handler está bien encapsulado en `routes.py::callback`.
+
+**Reality**: post Group 4 fixes (CR-1, CR-3, H-9), el handler tiene ~150 líneas con 5 retorno-de-error possible y 2 ramas de upsert. Sigue legible, pero ya cerca del límite.
+
+**Acción pendiente (refactor estructural)**: cuando se añada Capa 7 (PKCE + Entra refresh flow) o Capa de logging estructurado, extraer `auth/callback_service.py` con funciones:
+- `validate_callback_state(...)` → state cookie + state param + payload.
+- `exchange_and_validate(...)` → exchange_code + validate_id_token + JWKS retry.
+- `upsert_user_and_tokens(...)` → bypass_scoping + INSERT/UPDATE.
+- `build_callback_response(...)` → cookies + redirect.
+
+**Cuándo**: cuando el handler vuelva a crecer. No bloquea hoy.
+
+**Lección**: 150 líneas en un handler son tolerables si las ramas son lineales (sequential validation pipeline). El smell viene cuando hay branching paralelo o lógica reutilizable que no se reusa por estar inline.
+
+---
+
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 12 (1 categoría hardware, 2 wiki, 3 plan, 2 spec ops, 2 proceso, 2 ambiguity).
+**Total drifts identificados**: 22 (de los cuales 10 corresponden al review Capa 2).
 
 **Severidad**:
-- 🔴 CRITICAL: 2 (D-001 hardware, D-008 subagent sandbox — ambas afectan futuros trabajos)
-- 🟠 HIGH: 4 (D-002, D-004, D-006, D-007, D-009)
-- 🟡 MEDIUM: 5 (D-003, D-005, D-010, D-011)
-- 🟢 LOW: 1 (D-012)
+- 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
+- 🟠 HIGH: 5 (D-002, D-004, D-006, D-007, D-009, D-013)
+- 🟡 MEDIUM: 9 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021)
+- 🟢 LOW: 4 (D-012, D-019, D-020, D-022)
 
-**Drifts ya cerrados**: 11/12.
+**Drifts ya cerrados**: 14/22.
 
-**Drifts pendientes de cierre**:
-- D-010 (graphify --update post-Capa 2 Batch 2). En cola.
-- D-011 (Settings validator para OAUTH_TOKEN_ENC_KEY/JWT_SECRET). Implementar en Capa 2 cuando se toque ERR-2/ERR-3.
+**Drifts pendientes de cierre (acciones concretas)**:
+
+| ID | Acción | Tipo | Cuándo |
+|----|--------|------|--------|
+| D-010 | `/graphify --update` post-Capa 2 fix | proceso | tras cerrar este fix-cycle |
+| D-013 | RF-AUTH-02: 200→302 + body delegado a /auth/me | wiki | sesión wiki dedicada |
+| D-014 | ADR-015 superseding ADR-014 + 05_modelo_datos | wiki | sesión wiki dedicada |
+| D-016 | RF-AUTH-01 multi-tab note | wiki | sesión wiki dedicada |
+| D-017 | RF-AUTH-08 banner UI bearer estado | wiki | sesión wiki dedicada |
+| D-018 | RF-MCP-00 stub | wiki | sesión wiki dedicada |
+| D-019 | Encryption key rotation versioning | code | post-Capa 6 o auditoría |
+| D-020 | last_used_at throttle 5 min | code | bajo Capa 6 carga real |
+| D-021 | Test sub-app fixture refactor | tests | pre-Capa 6 |
+| D-022 | Callback service extraction | refactor | cuando crezca |
 
 **Pattern emergente para futuras capas**:
 1. Antes de cerrar specs/ADRs, validar las asunciones físicas (hardware, lib semantics, dialect-specific types) con un experimento mínimo.
 2. Subagents para escritura, main session para ejecución.
 3. Suspensiones de reglas de gobernanza se documentan, no se silencian.
 4. Plan code blocks son hipótesis ejecutable, no deuda compilada — esperar deviations en runtime.
+5. **Defaults de seguridad fail-closed; el bypass siempre es explícito (context manager, no flag inline).**
+6. **Reviews multi-agente sin context-poisoning capturan invariantes de seguridad que el implementador deja fail-open por inercia.**
+7. **Drifts de RFs/ADRs descubiertos en review se anotan en este log y se baja una sesión wiki dedicada — no se pisan los specs en caliente.**

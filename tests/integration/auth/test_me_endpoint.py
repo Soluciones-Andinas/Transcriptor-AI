@@ -53,7 +53,13 @@ async def test_me_with_flash_returns_plaintext_and_clears(client, session):
     Spec: SPEC-capa2-auth-msentra-v1
     Criterion: AC-13 — flash cookie present → response includes plaintext;
     Set-Cookie clears the flash on the same response.
+
+    M-10: structured Set-Cookie assertions instead of substring matches.
+    H-8: deletion attributes (path/secure/httponly/samesite) must mirror
+    the original set so the browser actually drops the cookie.
     """
+    from tests.integration.auth._cookies import find_set_cookie, is_cookie_deletion
+
     user, bearer, session_token = await _login_as(session)
 
     flash_plaintext = "FLASH_BEARER_PLAINTEXT_xyz"
@@ -68,11 +74,12 @@ async def test_me_with_flash_returns_plaintext_and_clears(client, session):
     assert body["bearer"]["id"] == str(bearer.id)
     assert body["bearer"]["plaintext"] == flash_plaintext
 
-    # Flash cookie deleted on this response.
-    set_cookies = r.headers.get_list("set-cookie")
-    flash_clears = [c for c in set_cookies if c.startswith("mcp_bearer_flash=")]
-    assert flash_clears, set_cookies
-    assert "Max-Age=0" in flash_clears[0] or 'expires=' in flash_clears[0].lower()
+    flash_delete = find_set_cookie(r.headers, "mcp_bearer_flash")
+    assert is_cookie_deletion(flash_delete), flash_delete
+    assert flash_delete.get("path") == "/", flash_delete
+    assert flash_delete.get("secure") is True, flash_delete
+    assert flash_delete.get("httponly") is True, flash_delete
+    assert str(flash_delete.get("samesite", "")).lower() == "strict", flash_delete
 
 
 # ---------------------------------------------------------------------------
@@ -127,24 +134,29 @@ async def test_logout_clears_session_cookie(client, session):
     """
     Spec: SPEC-capa2-auth-msentra-v1
     Criterion: AC-20 — POST /auth/logout → 302 a /login + Set-Cookie session
-    con Max-Age=0. Subsiguiente /auth/me devuelve 401.
+    con Max-Age=0 (o expires en el pasado).
+
+    M-9: la versión anterior afirmaba "subsiguiente /auth/me devuelve 401"
+    sin re-mandar la cookie de sesión, lo cual era un FALSE POSITIVE — la
+    request siguiente nunca llevaba cookie aunque la deleción no hubiese
+    funcionado. Ahora afirmamos sobre la estructura del header de deleción
+    (M-9, M-10) y verificamos que coincide con los atributos del set
+    original (H-8: path/secure/httponly/samesite).
     """
+    from tests.integration.auth._cookies import find_set_cookie, is_cookie_deletion
+
     _, _, session_token = await _login_as(session, email="carol@sandinas.test")
 
     r = await client.post("/auth/logout", cookies={"session": session_token})
     assert r.status_code == 302
     assert r.headers["location"] == "/login"
 
-    set_cookies = r.headers.get_list("set-cookie")
-    session_clears = [c for c in set_cookies if c.startswith("session=")]
-    assert session_clears
-    assert "Max-Age=0" in session_clears[0] or 'expires=' in session_clears[0].lower()
-
-    # Subsiguiente /auth/me sin cookie session → 401.
-    # (httpx.AsyncClient con follow_redirects=False no propaga Set-Cookie
-    # entre requests automáticamente; lo simulamos manualmente.)
-    r2 = await client.get("/auth/me")
-    assert r2.status_code == 401
+    deletion = find_set_cookie(r.headers, "session")
+    assert is_cookie_deletion(deletion), deletion
+    assert deletion.get("path") == "/", deletion
+    assert deletion.get("secure") is True, deletion
+    assert deletion.get("httponly") is True, deletion
+    assert str(deletion.get("samesite", "")).lower() == "strict", deletion
 
 
 # ---------------------------------------------------------------------------

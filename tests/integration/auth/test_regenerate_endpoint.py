@@ -113,26 +113,35 @@ async def test_regenerate_unauthenticated_returns_401(client, session):
 async def test_regenerate_handles_double_regen_via_retry(client, session):
     """
     Spec: SPEC-capa2-auth-msentra-v1
-    Criterion: ERR-4 — dos POST /auth/regenerate-mcp-token consecutivos por
+    Criterion: ERR-4 — dos POST /auth/regenerate-mcp-token CONCURRENTES por
     el mismo user. Ambos devuelven 200, los plaintexts difieren, y al final
     hay exactamente UN bearer activo en DB (last-writer-wins).
+
+    H-3: la versión anterior secuencializaba las requests, lo cual no
+    ejercía la lógica de retry-on-IntegrityError. asyncio.gather mete las
+    dos POSTs en paralelo: ambas pegan a la DB casi simultáneamente, una
+    de las dos pierde la UNIQUE parcial `uq_mcp_bearers_active_per_user`,
+    rollback + retry, y eventualmente las dos terminan con 200.
     """
+    import asyncio
+
+    from transcription_api.auth.mcp_bearer import hash_bearer
     from transcription_api.db.models import McpBearer
 
     user, _, session_token = await _login_as(session, email="bob@x")
 
-    r1 = await client.post(
-        "/auth/regenerate-mcp-token", cookies={"session": session_token},
-    )
-    r2 = await client.post(
-        "/auth/regenerate-mcp-token", cookies={"session": session_token},
+    r1, r2 = await asyncio.gather(
+        client.post("/auth/regenerate-mcp-token", cookies={"session": session_token}),
+        client.post("/auth/regenerate-mcp-token", cookies={"session": session_token}),
     )
 
-    assert r1.status_code == 200
-    assert r2.status_code == 200
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
     assert r1.json()["bearer"]["plaintext"] != r2.json()["bearer"]["plaintext"]
 
-    # Final DB state: exactly one active bearer per user.
+    # Final DB state: exactly one active bearer per user (the partial UNIQUE
+    # constraint guarantees it; the test confirms our retry logic doesn't
+    # leave duplicate active rows).
     n_active = (
         await session.execute(
             select(func.count())
@@ -141,9 +150,11 @@ async def test_regenerate_handles_double_regen_via_retry(client, session):
             .where(McpBearer.revoked_at.is_(None))
         )
     ).scalar_one()
-    assert n_active == 1
+    assert n_active == 1, (
+        f"expected exactly 1 active bearer post-race; got {n_active}"
+    )
 
-    # And total bearers for user = 3 (initial + 2 regenerated).
+    # Total bearers for user = 3 (initial + 2 regenerated).
     n_total = (
         await session.execute(
             select(func.count()).select_from(McpBearer).where(McpBearer.user_id == user.id)
@@ -151,9 +162,7 @@ async def test_regenerate_handles_double_regen_via_retry(client, session):
     ).scalar_one()
     assert n_total == 3
 
-    # The active one matches r2's plaintext (last writer).
-    from transcription_api.auth.mcp_bearer import hash_bearer
-    last_plaintext = r2.json()["bearer"]["plaintext"]
+    # Whichever request was last-to-commit owns the active bearer.
     active = (
         await session.execute(
             select(McpBearer)
@@ -161,4 +170,7 @@ async def test_regenerate_handles_double_regen_via_retry(client, session):
             .where(McpBearer.revoked_at.is_(None))
         )
     ).scalar_one()
-    assert active.token_hash == hash_bearer(last_plaintext)
+    plaintexts = {r1.json()["bearer"]["plaintext"], r2.json()["bearer"]["plaintext"]}
+    assert active.token_hash in {hash_bearer(p) for p in plaintexts}, (
+        "active bearer must correspond to one of the two race winners"
+    )
