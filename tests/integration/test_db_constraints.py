@@ -13,9 +13,8 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from transcription_api.db.models import Transcription
 from tests.factories import make_bearer, make_transcription, make_user
-
+from transcription_api.db.models import Transcription
 
 pytestmark = pytest.mark.requires_docker
 
@@ -70,12 +69,12 @@ async def test_partial_unique_under_concurrent_inserts(migrated_db_url):
     import asyncio
     import secrets
 
+    from sqlalchemy.exc import IntegrityError
     from sqlalchemy.ext.asyncio import (
         AsyncSession,
         async_sessionmaker,
         create_async_engine,
     )
-    from sqlalchemy.exc import IntegrityError
 
     engine = create_async_engine(migrated_db_url, future=True)
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
@@ -112,8 +111,9 @@ async def test_partial_unique_under_concurrent_inserts(migrated_db_url):
     finally:
         # Cleanup: remove the user we created so the test is idempotent.
         async with factory() as s:
-            from transcription_api.db.models import User
             from sqlalchemy import delete
+
+            from transcription_api.db.models import User
             await s.execute(delete(User).where(User.id == user_id))
             await s.commit()
         await engine.dispose()

@@ -99,10 +99,20 @@ async def engine(migrated_db_url: str):
 
 @pytest_asyncio.fixture
 async def session(engine) -> AsyncGenerator:
-    """Per-test AsyncSession with auto-rollback to keep tests isolated."""
+    """Per-test AsyncSession with auto-rollback to keep tests isolated.
+
+    The fixture session is the test driver's lane (factories, verification
+    queries) — NOT the lane the FastAPI request handlers use. We arm
+    `scoping_bypass` once so test setup/assert queries on per-user models
+    don't trip the fail-closed listener (CR-5). Real per-user scoping
+    behavior is exercised through the FastAPI client + `get_session()`
+    dependency, which produces a separate session armed with `user_id`
+    by the auth middleware.
+    """
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
     async with factory() as s:
+        s.info["scoping_bypass"] = True
         yield s
         await s.rollback()

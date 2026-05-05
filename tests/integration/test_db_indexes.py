@@ -16,7 +16,6 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
-
 pytestmark = pytest.mark.requires_docker
 
 

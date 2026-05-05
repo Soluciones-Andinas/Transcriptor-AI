@@ -21,13 +21,11 @@ Run with: `pytest -m e2e`
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-
 
 pytestmark = pytest.mark.e2e
 

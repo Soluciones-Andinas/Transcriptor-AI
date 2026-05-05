@@ -23,7 +23,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SAQueueTimeoutError
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SAQueueTimeoutError
 
 from .config import settings
 from .gpu import AcceleratorInfo, detect_accelerator
@@ -88,6 +89,14 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+# Capa 2 — wire the auth module's router. Routes are progressively populated
+# across batches B2-B5; B1 ships the smoke endpoint /auth/_ping so AC-1
+# (test_auth_module_imports) verifies the wire.
+from .auth import router as auth_router  # noqa: E402
+
+app.include_router(auth_router)
 
 
 # ---------------------------------------------------------------------------

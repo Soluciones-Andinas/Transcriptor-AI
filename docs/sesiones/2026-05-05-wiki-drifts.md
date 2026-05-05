@@ -1,0 +1,419 @@
+# Drift log — Capa 1 + inicio Capa 2 (2026-05-05)
+
+> **Propósito**: registrar deltas entre lo que el wiki / spec / plan asumían y lo que la realidad mostró durante la implementación. Cada entrada debería ser actionable: o se corrigió el wiki/plan/proceso, o queda como warning para iteraciones futuras.
+>
+> **Convención de severidad**:
+> - 🔴 **CRITICAL** — si no se corrige, futuras capas o re-runs heredan el bug
+> - 🟠 **HIGH** — afectó esta implementación, ya corregido pero merece doc para no repetirlo
+> - 🟡 **MEDIUM** — fricción menor, workaround aplicado, conviene revisar al refactorizar
+> - 🟢 **LOW** — cosmético / informativo
+
+---
+
+## Categoría 1 — Drifts wiki ↔ realidad de hardware
+
+### D-001 🔴 Hardware GPU del rig: RTX 5060 Ti 16 GB → RTX 4060 Ti 8 GB
+
+**Asumido (wiki original 2026-04-30)**: rig con NVIDIA GeForce RTX 5060 Ti, 16 GB VRAM.
+
+**Reality (smoke en rig 2026-05-05, `nvidia-smi`)**: NVIDIA GeForce RTX 4060 Ti, 8 GB VRAM.
+
+**Propagación de la asunción incorrecta**:
+- `wiki/01_alcance_funcional.md` — restricciones técnicas, criterios de latencia.
+- `wiki/02_arquitectura.md` — §1 resumen ejecutivo, §3 C4 boundary, §5 stack table, §6 deployment node.
+- `wiki/ADR/ADR-001.md` — toda la justificación de WhisperX large-v3 con `compute_type=float16`.
+- `wiki/ADR/ADR-005.md` — math de VRAM combinada (large-v3 + pyannote ~12 GB / 16 GB).
+- `.env.example`, `docker-compose.yml`, `src/transcription_api/config.py` — `COMPUTE_TYPE=float16` default.
+- `README.md`, `CLAUDE.md` — descripción top-level del proyecto.
+- `src/transcription_api/gpu.py` — comments y docstrings.
+- `tests/integration/test_gpu_detection.py` — mocks usaban "RTX 5060 Ti".
+
+**Resolución (commit `57bfe81`)**: cascada de 11 archivos. Stack STT cambia de `compute_type=float16` (~10-11 GB Whisper + ~2-3 GB pyannote = no entra) a `compute_type=int8_float16` (~5-6 GB + 2-3 GB = entra apretado). ADR-001 reescrito in-place (con suspensión explícita de la regla de inmutabilidad).
+
+**Lección**: el wiki SDD se basó en una asunción de hardware no validada empíricamente. Para futuras decisiones que dependan de specs físicas, hacer `nvidia-smi` o equivalente **antes** de cerrar el ADR. Aún quedan dos validaciones empíricas pendientes:
+1. ¿Whisper large-v3 int8 + pyannote 3.1 entran juntos en 8 GB sin OOM bajo carga real? (Capa 4)
+2. ¿El WER en español rioplatense con int8_float16 es aceptable (<8%)? (Capa 4)
+
+Si alguna falla → fallback a `large-v3-turbo` o Canary + glue code (Opción D / B en ADR-001 actualizado).
+
+---
+
+## Categoría 2 — Drifts wiki ↔ código (convenciones)
+
+### D-002 🟠 Naming de UNIQUE indexes: `idx_*` (wiki) vs `uq_*` (SQLAlchemy)
+
+**Asumido (wiki/05_modelo_datos.md original)**:
+```
+Index: `idx_users_email` (UNIQUE), `idx_users_microsoft_oid` (UNIQUE).
+Index: `idx_oauth_tokens_user_id` (UNIQUE — un solo token activo por user).
+Index: `idx_mcp_bearers_user_id`, `idx_mcp_bearers_token_hash` (UNIQUE).
+```
+
+**Reality**: SQLAlchemy + naming convention emite `uq_<table>_<col>` para `UniqueConstraint` y `idx_<table>_<col>` solo para `Index` no-único. Postgres muestra ambos en `pg_indexes` (los UNIQUE constraints están implementados como unique indexes). Pero a nivel SQL/SQLAlchemy son distintos:
+- `UniqueConstraint('email')` → emite `ALTER TABLE ... ADD CONSTRAINT uq_users_email UNIQUE (email)`
+- `Index('idx_users_email', ..., unique=True)` → emite `CREATE UNIQUE INDEX idx_users_email ON users (email)`
+
+**Resolución (commit `236b1e6` review-D)**: wiki actualizado para usar `uq_*` para constraints y `idx_*` para índices propiamente dichos. La convención SQLAlchemy gana porque es más expresiva semánticamente (constraint vs index propio).
+
+**Lección**: el wiki SDD lo escribió alguien (yo) sin grounding fuerte en el ORM concreto que se iba a usar. Para próximos modelos de datos: validar la convención de nombres del ORM elegido **antes** de cerrar el wiki §2.
+
+### D-003 🟡 Atributos Python `Mapped[float]` vs `Numeric(10,2)` real
+
+**Asumido (model definition Capa 1 batch 1)**:
+```python
+duration_seconds: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+```
+
+**Reality**: SQLAlchemy + asyncpg materializa `Numeric` como `decimal.Decimal`, no `float`. La anotación mentía a mypy y rompía aritmética mixta float/Decimal con `TypeError`.
+
+**Resolución (commit `ca4917d` review-C)**: cambiado a `Mapped[Decimal]`. Test explicit `test_transcription_duration_round_trips_as_decimal`.
+
+**Lección**: confiar en el dialect, no en la asunción "SQL numeric ≈ Python float". `Mapped[T]` debe matchear el tipo Python que el driver retorna, no el tipo conceptual SQL.
+
+---
+
+## Categoría 3 — Drifts plan ↔ realidad de librerías
+
+### D-004 🟠 `itsdangerous.URLSafeTimedSerializer.loads(max_age=0)` no expira
+
+**Asumido (plan T2 RED block)**:
+```python
+with pytest.raises(StateExpired):
+    verify_state(token, max_age_seconds=0)
+```
+
+**Reality**: itsdangerous compara `age > max_age` en estricto, no `>=`. Dentro del mismo segundo `age=0`, así que `0 > 0` es `False` y no se dispara `SignatureExpired`.
+
+**Resolución (commit `8f6150a` Capa 2 T2)**: cambiar a `max_age_seconds=-1` que hace `0 > -1 == True`. Documentado en docstring del test.
+
+**Lección**: plan code blocks no son deuda compilada. Asumir behavior estándar de libs de terceros sin validar el edge case TTL es trampa común. Otros equivalentes potenciales: `time.time()` vs `time.monotonic()` para timeouts; `datetime.utcnow()` vs `datetime.now(tz=timezone.utc)` para `iat`/`exp` JWT.
+
+### D-005 🟡 Plan T1 importa de módulos que no existen aún (T4)
+
+**Asumido (plan T1 GREEN block)**:
+```python
+# src/transcription_api/auth/__init__.py
+from .routes import router
+from .dependencies import get_current_user_web, get_current_user_mcp
+```
+
+**Reality**: T1 se ejecuta antes que T4 (que crea routes.py) y B5/B6 (que implementan dependencies.py). Si seguís el plan textualmente, T1 GREEN falla con `ImportError`.
+
+**Resolución (Capa 2 Batch 1 ejecución)**: en T1 GREEN creé stubs mínimos para `routes.py` (router + ping placeholder) y `dependencies.py` (callables que raise 501) para que `__init__.py` re-exports funcionen y AC-1 pase. Real implementations vienen en T4/B5/B6.
+
+**Lección**: el plan tiene un orden de tasks que no es topológicamente consistente con sus imports. Mejorar al escribir planes: ordenar tasks por dependencias de import primero, o explicitar "stub mínimo" para módulos que se completan en tasks posteriores.
+
+### D-006 🟡 Plan AC-1 "test_auth_module_imports" no testea el wire HTTP
+
+**Asumido (plan T1 / AC-1)**: AC-1 es satisfecho con `from transcription_api.auth import router, get_current_user_web, get_current_user_mcp` exits 0.
+
+**Reality**: ese test pasa con los stubs de T1 incluso sin `app.include_router(auth_router)` ejecutado. Cumple AC-1 a nivel módulo pero no garantiza que el router está vivo en la app.
+
+**Resolución (Capa 2 T4)**: agregué `tests/integration/auth/test_router_wire.py::test_auth_ping_returns_ok` que sí prueba el HTTP completo. Lo trace al wire de T4.
+
+**Lección**: ACs sobre "módulo importable" deberían explícitamente cubrir "+ wire correcto en la app si aplica". Sin esto, alguien podría borrar `app.include_router(...)` y el test seguiría verde.
+
+---
+
+## Categoría 4 — Drifts spec ↔ realidad operativa
+
+### D-007 🟠 Dockerfile `pip install -e .` falla por `src/` aún no copiado
+
+**Asumido (Capa 1 Dockerfile original)**:
+```dockerfile
+COPY pyproject.toml ./
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install -e .
+COPY src/ ./src/
+```
+
+Patrón Node-style "copy manifest → install deps → copy code" para maximizar cache.
+
+**Reality**: pyproject.toml tiene `[tool.setuptools.packages.find] where = ["src"]`. `pip install -e .` (editable mode) hace que setuptools lea `src/` en tiempo de install para registrar paquetes. Sin `src/` copiado todavía → `error: 'src' does not exist`.
+
+**Resolución (commits `f07b2eb` + `abc5ced`)**:
+1. Switch a non-editable: `pip install .` (containers de prod son immutable, no necesitan editable).
+2. Copy `src/` antes del pip install.
+3. Quitar `readme = "README.md"` de pyproject.toml (estaba bloqueando porque README.md está en `.dockerignore`).
+
+**Lección**: el patrón de cache "manifest → deps → code" funciona en ecosistemas donde el manifest no referencia el code (Node, Go). En Python con setuptools+`packages.find` el manifest **necesita** ver el code. Para reusar layer cache en proyectos Python, generar un `requirements.txt` separado.
+
+### D-008 🔴 Subagents en este harness NO tienen Bash/git/pip
+
+**Asumido (planes Capa 1 y Capa 2)**: subagents pueden ejecutar pytest, pip, git via su tool surface "*".
+
+**Reality (3 confirmaciones consecutivas)**:
+1. Graphify-update agent: abortó al primer Bash call.
+2. Code-executor Capa 2 Batch 1: escribió RED tests pero no pudo ejecutar pytest ni `pip install` ni `git commit`.
+3. (Verificación implícita) los planes que asumían "subagent corre el TDD cycle completo" eran wishful thinking.
+
+**Resolución**: pattern "write-only mode" para subagents. El agent escribe archivos, retorna lista + diff + comandos sugeridos. La main session corre tests + commits. Para Capa 2 Batch 2 ya lo aplico (lanzamiento de hoy).
+
+**Lección permanente**: los planes para este harness deben asumir que subagents son **escritores no ejecutores**. Ningún task que requiera RED-verify-FAIL en un subagent es viable. Reformular a: "subagent escribe RED + GREEN; main session valida + commitea".
+
+---
+
+## Categoría 5 — Drifts proceso (CLAUDE.md ↔ práctica)
+
+### D-009 🟠 ADR immutability rule suspendida para hardware fix
+
+**Regla (CLAUDE.md §11)**: "ADRs with status `Aceptada` are immutable. Replacement requires a new ADR. The previous ADR keeps its content; only its status field changes to `Reemplazada` y `Reemplazada por: ADR-NNN`."
+
+**Realidad (commit `57bfe81`)**: ADR-001 editado in-place. No se creó ADR-015 para superseder.
+
+**Justificación explícita del usuario**: "claude esa regla de ADR immutability no vamos a considerarla ahora, REEMPLAZA lo que diga ADR y resto de WIKI. Estoy trabajando yo solo por ahora, mas adelante lo hacemos bien".
+
+**Resolución**: edit in-place aceptado para esta etapa solo-yo. Documentado aquí para que cuando el equipo crezca, se haga la deuda técnica explícita: re-introducir ADRs de superseding para los cambios pre-team.
+
+**Lección**: las reglas de gobernanza están escritas para el caso multi-equipo. En contexto solo-dev se pueden suspender deliberadamente, pero hay que **documentar la suspensión** para no perder la trazabilidad cuando llegue el momento de hacerlo bien.
+
+### D-010 🟡 `ps-trazabilidad` corrió pero graphify update se difirió
+
+**Regla (CLAUDE.md §8)**: "Any change in wiki structure → run `/graphify --update`".
+
+**Realidad**: tras Capa 1 cierre + ADR-014 + hardware fix, el graphify update se intentó (sub-agent agente, falló por sandbox) y luego se difirió en main session porque correrlo durante el code-executor de Capa 2 Batch 1 implicaba snapshot transitorio + doble costo de tokens.
+
+**Resolución pendiente**: correr `/graphify --update` una vez Batch 2 cierre (estado coherente: Capa 1 + Capa 2 Batches 1+2 commiteados). En cola.
+
+**Lección**: el `--update` no es gratis (~50K tokens en este corpus). Conviene batchear los wiki changes y correr graphify una vez por capa cerrada, no después de cada commit.
+
+---
+
+## Categoría 6 — Drifts ambiguity → harden
+
+### D-011 🟡 `OAUTH_TOKEN_ENC_KEY` formato no validado en `Settings`
+
+**Asumido (.env.example)**: comentario "Generar con: python -c 'import secrets; print(secrets.token_urlsafe(32))'".
+
+**Reality**: el dev placeholder en .env era `dev-only-32-chars-padding-padding` (32 chars literal pero NO válido base64). `auth.crypto._load_key()` raise al import del módulo (correcto, ERR-2 implementado). PERO: ningún test corría con la clave del .env real, todos usaban `monkeypatch`. La primera persona que corrió `pip install -e ".[pipeline]"` y arrancó el container localmente iba a chocar con el error.
+
+**Resolución (parcial — code-executor agent fix)**: .env actualizado a una clave válida (32 zero bytes en base64) durante la ejecución del agent. Pero el .env del repo template (.env.example) sigue diciendo "completar con valor real" sin enforcement.
+
+**Resolución completa pendiente**: agregar validador en `Settings` post_init que verifique que `OAUTH_TOKEN_ENC_KEY` decodifica a 32 bytes y `JWT_SECRET` tiene ≥32 chars. Capa 2 spec ya lo lista como ERR-2 + ERR-3 — implementarlo cuando llegue.
+
+**Lección**: secrets / keys de longitud específica deben validarse en el boundary (Settings) no en el primer uso. Pydantic supports `field_validator` y `model_validator` que ejecutan al construir Settings.
+
+### D-012 🟢 README.md gitignored pero pyproject.toml lo referenciaba
+
+**Reality**: `.dockerignore` excluía explícitamente `*.md` y `README.md`. Al agregar `COPY README.md` al Dockerfile (para silenciar SetuptoolsWarning), el COPY falló porque README.md no estaba en build context.
+
+**Resolución (commit `abc5ced`)**: removí `readme = "README.md"` de pyproject.toml entirely. El proyecto no es un package publicable a PyPI; el long_description metadata era residual del template inicial.
+
+**Lección**: pyproject.toml referencia archivos que el contexto runtime puede no tener. Para servicios self-hosted (no published packages), simplificar pyproject.toml a lo mínimo necesario para `pip install`.
+
+---
+
+## Categoría 7 — Drifts del review multi-agente Capa 2 (2026-05-05)
+
+> Las siguientes drifts surgieron de la auditoría multi-agente sobre Capa 2
+> (auth Microsoft Entra + middleware MCP). Aplicación de fixes en commits
+> de los grupos 1-6 del fix plan. Por instrucción del usuario ("anota
+> wiki drifts para hacer correciones luego") las correcciones al wiki se
+> defieren a una sesión dedicada. Estas entradas son la lista accionable.
+
+### D-013 🟠 RF-AUTH-02 status code: spec dice 200, implementación devuelve 302
+
+**Asumido (RF-AUTH-02 / SPEC-capa2-auth-msentra-v1)**: la response a `GET /auth/callback` debe ser HTTP 200 con `Set-Cookie: session=...` y body con shape `{ user, bearer, mcp_url }`.
+
+**Reality**: la implementación devuelve `HTTP 302 → /mcp-setup` con `Set-Cookie: session=...` + flash. Esto es el patrón estándar de OAuth web (post-callback redirect a la SPA), preferido sobre 200-with-body porque:
+1. Si el cliente sigue redirects, aterriza en `/mcp-setup` con cookies seteadas listas para `GET /auth/me`.
+2. Body 200 al callback obliga al SPA a leer JSON de la respuesta del callback, que es awkward — el callback típicamente se navega como página, no se fetchea como API.
+
+**Resolución elegida (CR-6, instrucción explícita Franco)**: mantener 302. Wiki debe corregirse para reflejar el contrato real.
+
+**Acción pendiente sobre wiki**:
+- `wiki/RF/RF-AUTH.md` RF-AUTH-02: cambiar el status code de respuesta del callback de 200 a 302 con Location: /mcp-setup. Documentar que el body shape `{ user, bearer, mcp_url }` ahora se sirve por `GET /auth/me` (RF-AUTH-06), no por el callback. Tests integration ya validan 302 + Location.
+- `wiki/06_matriz_pruebas_RF.md`: actualizar la fila de AC-8 si se refiere al status del callback.
+
+**Lección**: specs deberían modelar OAuth flows como secuencia de redirects, no como una sola request/response. El "happy path" de OAuth es naturalmente 3+ saltos.
+
+---
+
+### D-014 🔴 ADR-014 listener: contrato cambió de fail-open a fail-closed (CR-5)
+
+**Asumido (ADR-014 / SPEC-capa1-postgres-orm-v1 review S-1)**: el listener `do_orm_execute` inyecta `WHERE user_id = X` cuando `session.info["user_id"]` está armado. Cuando NO está armado, el listener es no-op (queries retornan todas las filas — patrón "admin/migration context").
+
+**Reality post review**: el contrato fail-open es un silent-leak hazard. Si en alguna Capa futura se olvida el `Depends(get_current_user_*)` en una ruta, queries para-user-models retornan TODAS las filas. El reviewer multi-agente flaggeó esto como CR-5.
+
+**Resolución (esta sesión)**: listener pasa a FAIL-CLOSED. Una query SELECT/UPDATE/DELETE contra un per-user model cuyo session no tiene `user_id` armado **ni** `scoping_bypass=True` → raise `ScopingNotArmedError`. El bypass se hace ahora vía `with bypass_scoping(session): ...` (S-5) en lugar de `session.info["scoping_bypass"] = True` inline.
+
+**Sitios que ahora usan `bypass_scoping`**:
+- `auth/dependencies.py::get_current_user_web` (lookup del User por session.sub).
+- `auth/mcp_bearer.py::verify_bearer` (lookup del bearer por hash).
+- `auth/routes.py::callback` (todo el upsert pre-armado).
+- `tests/conftest.py::session` (armado una vez para todo el lifetime de la fixture).
+- `tests/integration/test_scoping_enforcement.py` reescrito para el nuevo contrato.
+
+**Acción pendiente sobre wiki**:
+- Crear ADR-015 `Listener fail-closed por defecto` con status `Reemplaza ADR-014`. ADR-014 mantiene su contenido pero status pasa a `Reemplazada`. El usuario suspendió la regla de inmutabilidad para esta etapa solo-dev (D-009), pero esta superseding sí merece ADR formal porque cambia un invariante crítico de seguridad.
+- `wiki/05_modelo_datos.md`: párrafo del listener actualizado al nuevo contrato.
+
+**Lección**: defaults de seguridad deben fail-closed, no fail-open. El reviewer multi-agente capturó esto exactamente porque su contexto era zero (no había sido condicionado a la lógica original) — argumento adicional a favor del review sin context-poisoning.
+
+---
+
+### D-015 🟡 Pool reuse leak risk: `db.info["user_id"]` no se limpiaba post-request (CR-4)
+
+**Asumido (Capa 1 batch 5)**: `async_session_factory()` crea AsyncSession nueva por request. Como las AsyncSessions no son pooled (solo las connections lo son), `session.info` no podría leakear entre requests.
+
+**Reality**: el invariante se mantiene HOY pero no es robusto a refactors. Si alguien introdujera caching de sessions (ej. una long-lived session inyectada en un job o test), `info["user_id"]` se heredaría del request previo.
+
+**Resolución (esta sesión)**: `get_session()` en `db/session.py` ahora limpia `db.info["user_id"]` y `db.info["scoping_bypass"]` en `finally`, defensa-en-profundidad. Costo: ~zero. Beneficio: hace explícito el contrato "session.info pertenece a un request, no se hereda".
+
+**Acción pendiente sobre wiki**: ninguna (mejora interna, no cambia contratos públicos).
+
+**Lección**: defensive cleanup en boundaries (request teardown, transaction commit) protege contra refactors futuros aunque hoy no sea necesario.
+
+---
+
+### D-016 🟡 RF-AUTH-01 multi-tab: caso no especificado (S-6)
+
+**Asumido (RF-AUTH-01)**: usuario inicia /auth/login en una tab, completa MS Entra, vuelve al callback con cookies seteadas.
+
+**Reality**: ¿qué pasa si abre /auth/login en TAB A, queda en MS Entra, y luego abre /auth/login en TAB B? La cookie `oauth_state` de B reemplaza la de A (mismo path / domain / name). Cuando A vuelve del callback con su state-param, no matchea la cookie ahora-de-B → AUTH_INVALID_STATE.
+
+**Comportamiento actual**: ya está cubierto correctamente (state mismatch redirige a login con error). Pero el spec no lo documenta como caso esperado.
+
+**Acción pendiente sobre wiki**:
+- `wiki/RF/RF-AUTH.md` RF-AUTH-01: añadir sección "Multi-tab" explicando que la última /auth/login gana la cookie, las anteriores fallarán con AUTH_INVALID_STATE al volver. Usuario debe re-iniciar el flow.
+
+**Lección**: especificar comportamiento bajo concurrencia del usuario en el cliente (multi-tab, multi-window) es parte del contrato funcional, no un edge case de implementación.
+
+---
+
+### D-017 🟡 ALT-1 logout no revoca bearer: requisito UI no documentado (S-3)
+
+**Asumido (ALT-1 SPEC-capa2)**: logout limpia cookie web pero NO revoca el MCP bearer. Razón: el user puede estar usándolo desde Claude Desktop (sin browser).
+
+**Reality**: este flujo es invisible al usuario en la UI actual. Si hace logout pensando "estoy completamente cerrando sesión", no entiende que el bearer sigue activo. Un atacante que robó el bearer aún tiene acceso después del logout.
+
+**Acción pendiente sobre wiki**: añadir RF-AUTH-08 "Banner UI sobre estado del bearer en /mcp-setup y /auth/me". Mensaje sugerido:
+> "Tu MCP bearer sigue activo después del logout web. Para revocarlo, usá `POST /auth/regenerate-mcp-token` o el botón 'Revocar bearer' en /mcp-setup."
+
+Esto es trabajo de capa UI futura; no bloquea Capa 2.
+
+**Lección**: cuando hay separación bearer-vs-cookie con TTLs distintos, el usuario necesita feedback visual del estado de cada uno. La spec funcional debe modelar el contrato de UI, no solo el de backend.
+
+---
+
+### D-018 🟡 Capa 6 (MCP) contract doc inexistente (S-2)
+
+**Asumido**: Capa 6 tendrá su propio set de RFs cuando se diseñe.
+
+**Reality**: ya hay decisiones tomadas en Capa 2 que dependen del contrato MCP futuro:
+- `mcp_url` field en /auth/me apunta a `${PUBLIC_BASE_URL}/mcp` (M-3).
+- Bearer scope: per-user, no per-tool, no per-resource.
+- Per-user scoping listener (ADR-014/015) asume Capa 6 hace queries ORM normales.
+
+**Acción pendiente sobre wiki**: crear stub `wiki/RF/RF-MCP-00.md` con el contract base (path, auth scheme, scoping, tool naming). No es completo — es un anchor para que /auth/me y middleware tests dejen de quedar como referencias colgantes.
+
+**Lección**: cuando una capa hace forward references a otra, conviene crear un stub spec en la otra capa antes de cerrar la primera. Reduce ambigüedades.
+
+---
+
+### D-019 🟢 Encryption key rotation no implementada (S-1)
+
+**Asumido**: `OAUTH_TOKEN_ENC_KEY` es un único secreto AES-256-GCM rotado raramente.
+
+**Reality**: en el flujo actual, rotar la key requiere desencriptar y re-encriptar todos los `oauth_tokens.ms_*_encrypted` en una migración. Si la key se compromete y hay que rotar fast, hay que coordinar app-down + migration window.
+
+**Acción pendiente (estratégica)**: prefijar el ciphertext con un key-id corto (e.g., 1 byte), permitir múltiples keys activas en `Settings.OAUTH_TOKEN_ENC_KEYS` (versionado), encrypt usa la primera, decrypt prueba todas. Rotación entonces es: agregar nueva key, dejar vieja para legacy ciphertexts, eventualmente migrar y descartar la vieja.
+
+**Cuándo**: cuando haya ≥1 incidente de rotación operativa o auditoría externa lo pida. No urgente.
+
+**Lección**: secretos versionados no son sobre-ingeniería si el operacional lo va a necesitar; pero pueden esperar al primer pinchazo si el blast radius es bajo (auth tokens MS, no datos del cliente).
+
+---
+
+### D-020 🟢 last_used_at throttle no implementado (S-7)
+
+**Asumido**: cada hit a `/_test_mcp_*` o cualquier ruta MCP futuro UPDATE-ea `mcp_bearers.last_used_at`.
+
+**Reality**: bajo carga (Capa 6 con MCP loop interactivo) cada llamada genera un UPDATE a la misma row. Postgres serializa, hay row-level locks, escalable pero no eficiente.
+
+**Acción pendiente (estratégica)**: throttle a "actualizar last_used_at solo si > 5 min desde la última". Implementación: comparar `now() - last_used_at > 300s` antes de hacer el UPDATE.
+
+**Cuándo**: cuando Capa 6 muestre tasa real de calls/segundo. No urgente para Capa 2.
+
+**Lección**: side-effects de auditoría (last_used_at, last_login_at) escalan O(N) con request rate. Throttling en boundary del request hits acceptable accuracy con una fracción del costo.
+
+---
+
+### D-021 🟡 Test routes pollution: prod app mutada en `_register_test_routes_once` (H-7)
+
+**Asumido (Capa 2 Batch 6)**: registrar rutas test-only `/_test_mcp_*` en la prod app es fine porque el prefijo `_test_` es no-colisionable y `include_in_schema=False` las esconde de OpenAPI.
+
+**Reality**: la mutación de la prod app en import-time del test module:
+1. Hace que los tests dependan del orden de import (el primer import registra, los siguientes son no-op).
+2. Pollutiona la prod app aunque los tests no se hayan corrido para Capa 6 (cualquier inspección de `app.routes` post-pytest las verá).
+3. Hace impossible testear con una prod app "limpia" en otro test.
+
+**Acción pendiente (refactor menor)**: en lugar de mutar la prod app, crear un sub-app fixture per-test:
+```python
+@pytest.fixture
+async def mcp_test_app():
+    sub_app = FastAPI()
+    sub_app.include_router(...)
+    yield sub_app
+```
+y montar en una mini app con la dependencia `Depends(get_current_user_mcp)`.
+
+**Cuándo**: pre-Capa 6 (antes de añadir más test routes). Trackear como follow-up.
+
+**Lección**: tests que mutan singletons de prod son una bomba de tiempo. Sub-app fixtures son fáciles, isolan, y permiten parallel pytest sin races.
+
+---
+
+### D-022 🟢 Callback handler god-function: extracción a service deferida (S-4)
+
+**Asumido**: el callback handler está bien encapsulado en `routes.py::callback`.
+
+**Reality**: post Group 4 fixes (CR-1, CR-3, H-9), el handler tiene ~150 líneas con 5 retorno-de-error possible y 2 ramas de upsert. Sigue legible, pero ya cerca del límite.
+
+**Acción pendiente (refactor estructural)**: cuando se añada Capa 7 (PKCE + Entra refresh flow) o Capa de logging estructurado, extraer `auth/callback_service.py` con funciones:
+- `validate_callback_state(...)` → state cookie + state param + payload.
+- `exchange_and_validate(...)` → exchange_code + validate_id_token + JWKS retry.
+- `upsert_user_and_tokens(...)` → bypass_scoping + INSERT/UPDATE.
+- `build_callback_response(...)` → cookies + redirect.
+
+**Cuándo**: cuando el handler vuelva a crecer. No bloquea hoy.
+
+**Lección**: 150 líneas en un handler son tolerables si las ramas son lineales (sequential validation pipeline). El smell viene cuando hay branching paralelo o lógica reutilizable que no se reusa por estar inline.
+
+---
+
+## Resumen ejecutivo
+
+**Total drifts identificados**: 22 (de los cuales 10 corresponden al review Capa 2).
+
+**Severidad**:
+- 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
+- 🟠 HIGH: 5 (D-002, D-004, D-006, D-007, D-009, D-013)
+- 🟡 MEDIUM: 9 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021)
+- 🟢 LOW: 4 (D-012, D-019, D-020, D-022)
+
+**Drifts ya cerrados**: 14/22.
+
+**Drifts pendientes de cierre (acciones concretas)**:
+
+| ID | Acción | Tipo | Cuándo |
+|----|--------|------|--------|
+| D-010 | `/graphify --update` post-Capa 2 fix | proceso | tras cerrar este fix-cycle |
+| D-013 | RF-AUTH-02: 200→302 + body delegado a /auth/me | wiki | sesión wiki dedicada |
+| D-014 | ADR-015 superseding ADR-014 + 05_modelo_datos | wiki | sesión wiki dedicada |
+| D-016 | RF-AUTH-01 multi-tab note | wiki | sesión wiki dedicada |
+| D-017 | RF-AUTH-08 banner UI bearer estado | wiki | sesión wiki dedicada |
+| D-018 | RF-MCP-00 stub | wiki | sesión wiki dedicada |
+| D-019 | Encryption key rotation versioning | code | post-Capa 6 o auditoría |
+| D-020 | last_used_at throttle 5 min | code | bajo Capa 6 carga real |
+| D-021 | Test sub-app fixture refactor | tests | pre-Capa 6 |
+| D-022 | Callback service extraction | refactor | cuando crezca |
+
+**Pattern emergente para futuras capas**:
+1. Antes de cerrar specs/ADRs, validar las asunciones físicas (hardware, lib semantics, dialect-specific types) con un experimento mínimo.
+2. Subagents para escritura, main session para ejecución.
+3. Suspensiones de reglas de gobernanza se documentan, no se silencian.
+4. Plan code blocks son hipótesis ejecutable, no deuda compilada — esperar deviations en runtime.
+5. **Defaults de seguridad fail-closed; el bypass siempre es explícito (context manager, no flag inline).**
+6. **Reviews multi-agente sin context-poisoning capturan invariantes de seguridad que el implementador deja fail-open por inercia.**
+7. **Drifts de RFs/ADRs descubiertos en review se anotan en este log y se baja una sesión wiki dedicada — no se pisan los specs en caliente.**
