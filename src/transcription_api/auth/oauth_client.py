@@ -8,9 +8,21 @@ Spec: SPEC-capa2-auth-msentra-v1
 httpx.AsyncClient is reused across calls. JWKS is cached with TTL 24h
 (`_JWKS_CACHE`); on signature failures the caller should evict the cache
 once and retry (handles MS key rotation).
+
+Capa 2 review:
+- H-5: `_JWKS_FETCH_LOCK` (asyncio.Lock) serializes concurrent JWKS
+  refreshes so a thundering herd at TTL expiry only triggers ONE outbound
+  request to login.microsoftonline.com. Subsequent waiters re-check the
+  cache after acquiring the lock (double-checked locking) and return the
+  fresh value without a second fetch.
+- M-5: removed the dead `[:96]` slice on the PKCE verifier.
+  `secrets.token_urlsafe(64)` already returns ~86 chars (well under 96
+  and well within the 43–128 RFC 7636 range), so the slice never trims
+  anything.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import secrets
@@ -48,8 +60,13 @@ class TenantNotAllowed(IdTokenInvalid):
 
 # --- PKCE + authorize URL (B2) -------------------------------------------
 def generate_pkce() -> tuple[str, str]:
-    """Generate (code_verifier, code_challenge) for OAuth 2.0 PKCE S256."""
-    verifier = secrets.token_urlsafe(64)[:96]
+    """Generate (code_verifier, code_challenge) for OAuth 2.0 PKCE S256.
+
+    `secrets.token_urlsafe(64)` returns ~86 url-safe chars, comfortably
+    inside the RFC 7636 §4.1 verifier range of 43–128 chars. No truncation
+    is needed.
+    """
+    verifier = secrets.token_urlsafe(64)
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     return verifier, challenge
@@ -114,27 +131,57 @@ async def exchange_code(code: str, code_verifier: str) -> dict[str, Any]:
 _JWKS_CACHE: dict[str, Any] | None = None
 _JWKS_CACHE_AT: float = 0.0
 _JWKS_TTL_SECONDS = 24 * 3600
+# H-5: serialize concurrent refreshes so a thundering herd at TTL expiry
+# triggers exactly one outbound request to login.microsoftonline.com.
+_JWKS_FETCH_LOCK: asyncio.Lock | None = None
+
+
+def _jwks_lock() -> asyncio.Lock:
+    """Lazily build the lock — at module import there may be no running loop."""
+    global _JWKS_FETCH_LOCK
+    if _JWKS_FETCH_LOCK is None:
+        _JWKS_FETCH_LOCK = asyncio.Lock()
+    return _JWKS_FETCH_LOCK
+
+
+def _cache_is_fresh() -> bool:
+    return (
+        _JWKS_CACHE is not None
+        and (time.time() - _JWKS_CACHE_AT) < _JWKS_TTL_SECONDS
+    )
 
 
 async def fetch_jwks(force_refresh: bool = False) -> dict[str, Any]:
-    """Return the cached JWKS or fetch a fresh copy if expired or forced."""
-    global _JWKS_CACHE, _JWKS_CACHE_AT
-    if not force_refresh and _JWKS_CACHE is not None:
-        if (time.time() - _JWKS_CACHE_AT) < _JWKS_TTL_SECONDS:
-            return _JWKS_CACHE
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            r = await client.get(_jwks_endpoint())
-    except (httpx.TimeoutException, httpx.NetworkError) as exc:
-        raise OAuthProviderUnavailable(f"JWKS fetch failed: {exc}") from exc
-    if r.status_code >= 500:
-        raise OAuthProviderUnavailable(f"JWKS endpoint returned {r.status_code}")
-    if r.status_code >= 400:
-        raise IdTokenInvalid(f"JWKS endpoint returned {r.status_code}")
+    """Return the cached JWKS or fetch a fresh copy if expired or forced.
 
-    _JWKS_CACHE = r.json()
-    _JWKS_CACHE_AT = time.time()
-    return _JWKS_CACHE
+    Concurrent callers are serialized by `_JWKS_FETCH_LOCK`. The first
+    waiter through the lock either confirms the cache is now fresh (a
+    prior holder refreshed it) and returns it, or performs the fetch
+    itself. This implements the standard double-checked-locking pattern.
+    """
+    global _JWKS_CACHE, _JWKS_CACHE_AT
+
+    if not force_refresh and _cache_is_fresh():
+        return _JWKS_CACHE  # type: ignore[return-value]
+
+    async with _jwks_lock():
+        # Re-check under the lock: a prior holder may have refreshed.
+        if not force_refresh and _cache_is_fresh():
+            return _JWKS_CACHE  # type: ignore[return-value]
+
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                r = await client.get(_jwks_endpoint())
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise OAuthProviderUnavailable(f"JWKS fetch failed: {exc}") from exc
+        if r.status_code >= 500:
+            raise OAuthProviderUnavailable(f"JWKS endpoint returned {r.status_code}")
+        if r.status_code >= 400:
+            raise IdTokenInvalid(f"JWKS endpoint returned {r.status_code}")
+
+        _JWKS_CACHE = r.json()
+        _JWKS_CACHE_AT = time.time()
+        return _JWKS_CACHE
 
 
 def _expected_issuer() -> str:
@@ -170,7 +217,12 @@ def validate_id_token(id_token: str, jwks: dict[str, Any]) -> dict[str, Any]:
 
 
 def reset_jwks_cache() -> None:
-    """Test-only helper to invalidate the JWKS cache between cases."""
-    global _JWKS_CACHE, _JWKS_CACHE_AT
+    """Test-only helper to invalidate the JWKS cache between cases.
+
+    Also drops the asyncio.Lock so a fresh test can build it in its own
+    event loop (asyncio.Lock is loop-bound on construction).
+    """
+    global _JWKS_CACHE, _JWKS_CACHE_AT, _JWKS_FETCH_LOCK
     _JWKS_CACHE = None
     _JWKS_CACHE_AT = 0.0
+    _JWKS_FETCH_LOCK = None
