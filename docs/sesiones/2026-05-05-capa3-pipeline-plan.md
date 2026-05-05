@@ -576,9 +576,9 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 | Spec | Criterio | Test | Status |
 |---|---|---|---|
 | SPEC-capa3 | AC-1 | `test_post_transcription_with_valid_bearer` + orchestrator + normalize + stt + diarize + merge | [ ] |
-| SPEC-capa3 | AC-2 | `test_post_transcription_cache_hit_skips_pipeline` | [ ] |
+| SPEC-capa3 | AC-2 | `test_cache_writes_and_reads_per_user` + `test_cache_returns_none_on_miss` (substrate). End-to-end `test_post_transcription_cache_hit_skips_pipeline` deferred to Batch 6. | [x] (substrate) / [ ] (E2E POST) |
 | SPEC-capa3 | AC-3 | `test_post_transcription_unauthenticated_401` | [ ] |
-| SPEC-capa3 | AC-4 | `test_normalize_rejects_unknown_format` + `test_post_rejects_exe_file` | [ ] |
+| SPEC-capa3 | AC-4 | `test_normalize_rejects_extension_outside_whitelist` + `test_normalize_rejects_magic_bytes_mismatch`. API surface `test_post_rejects_exe_file` deferred to Batch 6. | [x] (normalize layer) / [ ] (POST 400) |
 | SPEC-capa3 | AC-5 | `test_post_rejects_oversize` | [ ] |
 | SPEC-capa3 | AC-6 | `test_orchestrator_lock_serializes_two_jobs` | [ ] |
 | SPEC-capa3 | AC-7 | `test_lock_released_on_gpu_error` + `test_stt_maps_cuda_oom_to_gpu_error` | [ ] |
@@ -586,7 +586,7 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 | SPEC-capa3 | AC-9 | `test_health_reports_models_ready_after_lifespan` + `test_load_whisper_returns_object_with_transcribe` | [x] |
 | SPEC-capa3 | AC-10 | `test_cleanup_purges_expired_entries` | [ ] |
 | SPEC-capa3 | AC-11 | `test_orchestrator_pipeline_timeout` | [ ] |
-| SPEC-capa3 | AC-12 | `test_cache_writes_and_reads_per_user` | [ ] |
+| SPEC-capa3 | AC-12 | `test_cache_writes_and_reads_per_user` + `test_cache_isolates_users_via_filesystem_path` | [x] |
 | SPEC-capa3 | AC-13 | `test_get_returns_full_result_for_owner` | [ ] |
 | SPEC-capa3 | AC-14 | E2E rig smoke (manual, registrar en `vram-budget.md`) | [ ] |
 | SPEC-capa3 | AC-15 | `test_health_reports_pyannote_error_when_load_fails` + `test_load_pyannote_classifies_*` (4 tests) — 503 propagation deferred to Batch 6 (`test_post_returns_503_when_pyannote_failed_to_load`) | [x] (load failure surface) / [ ] (POST 503) |
