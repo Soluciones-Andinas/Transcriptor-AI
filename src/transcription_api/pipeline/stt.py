@@ -61,6 +61,61 @@ def load_whisper_model(model_size: str, device: str, compute_type: str) -> Any:
     )
 
 
+# ---------------------------------------------------------------------------
+# AC-7 — CUDA error mapping
+# ---------------------------------------------------------------------------
+# Stable discriminators surfaced as ``GPUError.detail``. The API layer
+# (Batch 6) maps GPUError to HTTP 500 ``GPU_ERROR`` and copies the detail
+# into the response body so operators can distinguish memory pressure
+# (smaller batch_size or smaller model) from a generic CUDA fault
+# (driver / hardware level).
+DETAIL_OOM = "oom"
+DETAIL_RUNTIME = "runtime"
+
+
+class GPUError(Exception):
+    """Raised when WhisperX inference fails due to a GPU-level fault.
+
+    ``detail`` is one of ``DETAIL_*`` and is the only piece of the error
+    that escapes to the public API surface. The upstream message is kept
+    in ``args[0]`` for log inspection.
+    """
+
+    def __init__(self, detail: str, message: str = "") -> None:
+        self.detail = detail
+        super().__init__(message or detail)
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """Return True if ``exc`` represents a CUDA out-of-memory condition.
+
+    We match by class name (``OutOfMemoryError``) AND by message text
+    rather than ``isinstance(exc, torch.cuda.OutOfMemoryError)``: the
+    real torch type only exists when torch is installed, which is NOT
+    the case on CPU-only dev machines (D-008 / D-030). Tests synthesize
+    the type with the same name; production raises the real one — both
+    cases match without importing torch here.
+    """
+    if type(exc).__name__ == "OutOfMemoryError":
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda oom" in msg
+
+
+def _is_cuda_runtime_error(exc: BaseException) -> bool:
+    """Return True if ``exc`` is a CUDA / CUBLAS runtime fault.
+
+    Pattern-match the message — the real type is ``RuntimeError`` so
+    ``isinstance`` would not discriminate from ordinary application
+    RuntimeErrors. Conservative: only match when the message explicitly
+    cites CUDA or CUBLAS so non-GPU RuntimeErrors propagate untouched.
+    """
+    if not isinstance(exc, RuntimeError):
+        return False
+    msg = str(exc).lower()
+    return "cuda" in msg or "cublas" in msg
+
+
 def transcribe(
     model: Any,
     audio_path: Path | str,
@@ -80,11 +135,20 @@ def transcribe(
     unchanged (D-034). The orchestrator (Batch 5) consumes both keys when
     building the API response.
 
-    AC-7 GPU error mapping is added in T3.2 (next task in this batch);
-    this thin wrapper currently lets all exceptions propagate so T3.2's
-    RED phase has something to fail against.
+    Maps CUDA OOM and CUDA/CUBLAS RuntimeErrors to ``GPUError`` so the
+    orchestrator can release the GPU lock in ``finally`` and the API
+    layer can return 500 ``GPU_ERROR`` with a stable detail. Other
+    exceptions propagate untouched.
     """
     kwargs: dict[str, Any] = {"batch_size": batch_size}
     if language is not None:
         kwargs["language"] = language
-    return model.transcribe(str(audio_path), **kwargs)
+
+    try:
+        return model.transcribe(str(audio_path), **kwargs)
+    except Exception as exc:
+        if _is_cuda_oom(exc):
+            raise GPUError(DETAIL_OOM, str(exc)) from exc
+        if _is_cuda_runtime_error(exc):
+            raise GPUError(DETAIL_RUNTIME, str(exc)) from exc
+        raise
