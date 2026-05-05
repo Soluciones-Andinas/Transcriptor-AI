@@ -13,7 +13,6 @@ import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 
-
 pytestmark = pytest.mark.requires_docker
 
 

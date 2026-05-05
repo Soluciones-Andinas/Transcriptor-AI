@@ -23,7 +23,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SAQueueTimeoutError
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SAQueueTimeoutError
 
 from .config import settings
 from .gpu import AcceleratorInfo, detect_accelerator

@@ -74,7 +74,25 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "W"]
-ignore = ["E501"]
+# E501: long lines OK (we already wrap manually).
+# N818: typed-exception names like StateInvalid/SessionExpired/TenantNotAllowed
+# read more naturally without an "Error" suffix in this codebase.
+ignore = ["E501", "N818"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI uses `Depends(...)` / `Header(...)` etc. as default arg values by design.
+# Whitelist them so B008 ("Do not perform function call in argument defaults")
+# does not fire on canonical FastAPI route signatures.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Header",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.Cookie",
+    "fastapi.File",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

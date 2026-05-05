@@ -17,7 +17,6 @@ tests do NOT touch real network. Each test:
 """
 from __future__ import annotations
 
-import secrets as _secrets
 import time
 import uuid
 from urllib.parse import parse_qs, urlparse
@@ -30,7 +29,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
-
 
 pytestmark = pytest.mark.requires_docker
 
@@ -195,9 +193,9 @@ async def test_callback_subsequent_login_updates_only(client, session):
     """
     from datetime import datetime, timedelta, timezone
 
+    from tests.factories import make_bearer, make_oauth_token, make_user
     from transcription_api.config import settings
     from transcription_api.db.models import McpBearer, OAuthToken, User
-    from tests.factories import make_bearer, make_oauth_token, make_user
 
     # Seed: user existing with bearer + tokens, last_login_at far in the past.
     existing_oid = uuid.uuid4()

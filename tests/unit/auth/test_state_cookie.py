@@ -16,7 +16,6 @@ def test_state_cookie_roundtrip_and_expiry():
     """
     from transcription_api.auth.state_cookie import (
         StateExpired,
-        StateInvalid,
         sign_state,
         verify_state,
     )

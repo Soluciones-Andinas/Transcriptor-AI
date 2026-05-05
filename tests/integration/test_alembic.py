@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 ALEMBIC_DIR = REPO_ROOT / "alembic"
@@ -127,7 +126,7 @@ async def test_no_migration_drift_against_models(engine):
     # - `idx_transcriptions_text_fts`: functional GIN index — SQLAlchemy
     #   can't literal-render regconfig 'spanish', so it's migration-only.
     # Plus, ignore server_default text() comparison false-positives.
-    INTENTIONAL_INDEX_DRIFT = {"idx_transcriptions_text_fts"}
+    intentional_index_drift = {"idx_transcriptions_text_fts"}
 
     def _is_intentional(diff) -> bool:
         if not (isinstance(diff, (list, tuple)) and diff):
@@ -135,7 +134,7 @@ async def test_no_migration_drift_against_models(engine):
         op_name = diff[0]
         if op_name in {"add_index", "remove_index"} and len(diff) >= 2:
             idx = diff[1]
-            if getattr(idx, "name", None) in INTENTIONAL_INDEX_DRIFT:
+            if getattr(idx, "name", None) in intentional_index_drift:
                 return True
         return False
 

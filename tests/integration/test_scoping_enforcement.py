@@ -14,14 +14,6 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from transcription_api.db import enable_per_user_scoping, set_session_user
-from transcription_api.db.models import (
-    Image,
-    McpBearer,
-    OAuthToken,
-    Transcription,
-    UploadSession,
-)
 from tests.factories import (
     make_bearer,
     make_image,
@@ -30,7 +22,14 @@ from tests.factories import (
     make_upload_session,
     make_user,
 )
-
+from transcription_api.db import enable_per_user_scoping, set_session_user
+from transcription_api.db.models import (
+    Image,
+    McpBearer,
+    OAuthToken,
+    Transcription,
+    UploadSession,
+)
 
 pytestmark = pytest.mark.requires_docker
 

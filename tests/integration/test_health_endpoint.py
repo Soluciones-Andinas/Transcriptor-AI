@@ -17,7 +17,6 @@ from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import OperationalError
 
-
 pytestmark = pytest.mark.requires_docker
 
 
@@ -92,6 +91,7 @@ async def test_pool_exhaustion_on_uncaught_endpoint_returns_503(engine, monkeypa
     handler maps SQLAlchemy pool TimeoutError to 503 with stable error_code.
     """
     from sqlalchemy.exc import TimeoutError as SAQueueTimeoutError
+
     from transcription_api.main import app
 
     @app.get("/_test_pool_exhaustion_probe")

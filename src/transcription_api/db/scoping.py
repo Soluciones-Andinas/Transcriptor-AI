@@ -38,7 +38,6 @@ from sqlalchemy.orm import ORMExecuteState
 
 from .base import Base
 
-
 _SCOPED_MODELS_CACHE: set[type] | None = None
 
 
