@@ -176,3 +176,110 @@ def test_transcribe_forwards_explicit_batch_size():
 
     _, kwargs = model.transcribe.call_args
     assert kwargs.get("batch_size") == 4
+
+
+# ---------------------------------------------------------------------------
+# AC-7 — CUDA error mapping
+# ---------------------------------------------------------------------------
+# Synthetic OOM type — name matches torch.cuda.OutOfMemoryError so the
+# class-name discriminator in stt.transcribe matches without importing
+# torch (CPU-only dev box, D-008/D-030).
+_SyntheticOutOfMemoryError = type("OutOfMemoryError", (RuntimeError,), {})
+
+
+def test_transcribe_maps_cuda_oom_to_gpu_error():
+    """
+    Spec: SPEC-capa3-pipeline-v1
+    Criterion: AC-7 — Given model.transcribe raises an OutOfMemoryError
+    (name-matched to torch.cuda.OutOfMemoryError), When transcribe is
+    invoked, Then GPUError is raised with detail='oom' so the orchestrator
+    (Batch 5) releases the GPU lock and the API (Batch 6) returns 500
+    GPU_ERROR with a stable detail.
+    """
+    from transcription_api.pipeline.stt import GPUError, transcribe
+
+    model = MagicMock()
+    model.transcribe.side_effect = _SyntheticOutOfMemoryError(
+        "CUDA out of memory. Tried to allocate 2.00 GiB"
+    )
+
+    with pytest.raises(GPUError) as exc:
+        transcribe(model, Path("/tmp/x.wav"))
+    assert exc.value.detail == "oom"
+
+
+def test_transcribe_maps_cuda_runtime_error_to_gpu_error():
+    """
+    Spec: SPEC-capa3-pipeline-v1
+    Criterion: AC-7 — Given model.transcribe raises RuntimeError whose
+    message cites CUDA (e.g. 'CUDA error: invalid argument'), When
+    transcribe is invoked, Then GPUError(detail='runtime') is raised.
+    """
+    from transcription_api.pipeline.stt import GPUError, transcribe
+
+    model = MagicMock()
+    model.transcribe.side_effect = RuntimeError("CUDA error: invalid argument")
+
+    with pytest.raises(GPUError) as exc:
+        transcribe(model, Path("/tmp/x.wav"))
+    assert exc.value.detail == "runtime"
+
+
+def test_transcribe_maps_cublas_runtime_error_to_gpu_error():
+    """
+    Spec: SPEC-capa3-pipeline-v1
+    Criterion: AC-7 — Given model.transcribe raises RuntimeError whose
+    message cites CUBLAS (cuBLAS BLAS library failure), When transcribe
+    is invoked, Then GPUError(detail='runtime') is raised. CUBLAS errors
+    surface from int8 quantized inference under memory pressure.
+    """
+    from transcription_api.pipeline.stt import GPUError, transcribe
+
+    model = MagicMock()
+    model.transcribe.side_effect = RuntimeError(
+        "CUBLAS_STATUS_EXECUTION_FAILED when calling `cublasGemmEx(...)`"
+    )
+
+    with pytest.raises(GPUError) as exc:
+        transcribe(model, Path("/tmp/x.wav"))
+    assert exc.value.detail == "runtime"
+
+
+def test_transcribe_does_not_remap_non_gpu_runtime_errors():
+    """
+    Spec: SPEC-capa3-pipeline-v1
+    Criterion: AC-7 (defensive) — Given model.transcribe raises a
+    RuntimeError whose message has nothing to do with CUDA/CUBLAS (e.g.
+    a code bug in WhisperX or a malformed config), When transcribe is
+    invoked, Then the original RuntimeError propagates UNCHANGED. We
+    don't want to masquerade non-GPU faults as GPUError because the
+    orchestrator's recovery path (release lock, retry advice) only
+    makes sense for actual GPU faults.
+    """
+    from transcription_api.pipeline.stt import GPUError, transcribe
+
+    model = MagicMock()
+    model.transcribe.side_effect = RuntimeError("some unrelated runtime bug")
+
+    with pytest.raises(RuntimeError) as exc:
+        transcribe(model, Path("/tmp/x.wav"))
+    assert not isinstance(exc.value, GPUError)
+    assert "unrelated runtime bug" in str(exc.value)
+
+
+def test_transcribe_does_not_remap_non_runtime_exceptions():
+    """
+    Spec: SPEC-capa3-pipeline-v1
+    Criterion: AC-7 (defensive) — Given model.transcribe raises a
+    non-RuntimeError (e.g. ValueError from a malformed audio path),
+    When transcribe is invoked, Then the exception propagates unchanged.
+    GPUError is reserved for GPU faults.
+    """
+    from transcription_api.pipeline.stt import GPUError, transcribe
+
+    model = MagicMock()
+    model.transcribe.side_effect = ValueError("not a valid audio file")
+
+    with pytest.raises(ValueError):
+        transcribe(model, Path("/tmp/x.wav"))
+    assert not model.transcribe.side_effect.__class__.__name__ == GPUError.__name__
