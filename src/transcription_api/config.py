@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     pipeline_timeout_seconds: int = Field(
         default=1800, alias="PIPELINE_TIMEOUT_SECONDS", gt=0
     )
+    # Capa 3 — model identifiers consumed by the lifespan loaders. Keep the
+    # batch-1 surface minimal: WHISPER_BATCH_SIZE / MAX_AUDIO_DURATION_SECONDS
+    # (spec §7) are introduced in later batches when they become load-bearing.
+    whisper_model: str = Field(default="large-v3", alias="WHISPER_MODEL")
+    whisper_device: str = Field(default="cuda", alias="WHISPER_DEVICE")
+    pyannote_model: str = Field(
+        default="pyannote/speaker-diarization-3.1", alias="PYANNOTE_MODEL"
+    )
 
     # --- Persistencia (Postgres) -------------------------------------------
     postgres_user: str = Field(default="transcription", alias="POSTGRES_USER")

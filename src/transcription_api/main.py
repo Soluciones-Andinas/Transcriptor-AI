@@ -28,6 +28,8 @@ from sqlalchemy.exc import TimeoutError as SAQueueTimeoutError
 
 from .config import settings
 from .gpu import AcceleratorInfo, detect_accelerator
+from .pipeline import diarize as _diarize
+from .pipeline import stt as _stt
 
 logger = logging.getLogger("transcription_api")
 
@@ -70,6 +72,71 @@ async def lifespan(app: FastAPI):
     _db.enable_per_user_scoping()
     logger.info("db_scoping_listener_enabled")
 
+    # Capa 3 — load Whisper + pyannote models. Both loaders run in a worker
+    # thread so the event loop stays responsive while CUDA churns. Loader
+    # failures NEVER abort startup (D-028, AC-15): the service stays UP and
+    # /health surfaces a per-model "error" + detail; POST /api/transcriptions
+    # will respond 503 MODELS_NOT_LOADED (Batch 6) until the operator fixes
+    # HF_TOKEN, the model cache, etc.
+    app.state.whisper_status = "loading"
+    app.state.whisper_detail = None
+    app.state.whisper_model = None
+    try:
+        app.state.whisper_model = await asyncio.to_thread(
+            _stt.load_whisper_model,
+            settings.whisper_model,
+            settings.whisper_device,
+            settings.compute_type,
+        )
+        app.state.whisper_status = "ready"
+        logger.info(
+            "whisper_model_ready model=%s device=%s compute_type=%s",
+            settings.whisper_model,
+            settings.whisper_device,
+            settings.compute_type,
+        )
+    except Exception as exc:  # noqa: BLE001
+        app.state.whisper_status = "error"
+        app.state.whisper_detail = str(exc)
+        logger.warning(
+            "whisper_load_failed error_id=WHISPER_LOAD_ERROR detail=%s",
+            exc,
+            exc_info=True,
+        )
+
+    app.state.pyannote_status = "loading"
+    app.state.pyannote_detail = None
+    app.state.pyannote_pipeline = None
+    try:
+        app.state.pyannote_pipeline = await asyncio.to_thread(
+            _diarize.load_pyannote_pipeline,
+            settings.hf_token.get_secret_value(),
+            settings.pyannote_model,
+        )
+        app.state.pyannote_status = "ready"
+        logger.info("pyannote_pipeline_ready model=%s", settings.pyannote_model)
+    except _diarize.PyannoteLoadError as exc:
+        app.state.pyannote_status = "error"
+        app.state.pyannote_detail = exc.detail
+        logger.warning(
+            "pyannote_load_failed error_id=PYANNOTE_LOAD_ERROR detail=%s",
+            exc.detail,
+        )
+    except Exception as exc:  # noqa: BLE001
+        app.state.pyannote_status = "error"
+        app.state.pyannote_detail = _diarize.DETAIL_UNKNOWN
+        logger.error(
+            "pyannote_load_failed error_id=PYANNOTE_LOAD_ERROR_UNKNOWN exc=%s",
+            exc,
+            exc_info=True,
+        )
+
+    # Pipeline lock block — defaults until Batch 5 wires the asyncio.Lock.
+    # Surfacing them now keeps /health's response shape stable across batches.
+    app.state.pipeline_lock_held = False
+    app.state.pipeline_active_job_id = None
+    app.state.pipeline_queue_depth = 0
+
     try:
         yield
     finally:
@@ -80,6 +147,21 @@ async def lifespan(app: FastAPI):
             logger.info("db_engine_disposed")
         except Exception:
             logger.error("db_engine_dispose_failed error_id=DB_DISPOSE_FAILED", exc_info=True)
+        # Defensive cleanup so back-to-back LifespanManager(app) entries in
+        # the same test run don't inherit prior state (mirrors D-015 lesson).
+        for attr in (
+            "whisper_status",
+            "whisper_detail",
+            "whisper_model",
+            "pyannote_status",
+            "pyannote_detail",
+            "pyannote_pipeline",
+            "pipeline_lock_held",
+            "pipeline_active_job_id",
+            "pipeline_queue_depth",
+        ):
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)
         logger.info("service_stopping")
 
 
@@ -142,6 +224,33 @@ async def _asyncio_timeout_handler(request: Request, exc: asyncio.TimeoutError) 
 # ---------------------------------------------------------------------------
 # /health — never raises (ERR-1).
 # ---------------------------------------------------------------------------
+class ModelsHealth(BaseModel):
+    """Per-model load state surfaced by /health (SPEC-capa3 AC-9 + AC-15).
+
+    `whisper_detail` and `pyannote_detail` are populated only when the
+    corresponding status is ``"error"``. The detail strings for pyannote
+    are stable discriminators (``hf_token_missing`` etc., see
+    ``pipeline.diarize.DETAIL_*``); the detail string for whisper is the
+    raw runtime error message — there is no enumerated catalogue yet
+    because the failure modes are heterogeneous (CUDA driver, OOM at
+    load, FS missing model cache, ...).
+    """
+
+    whisper: str  # "ready" | "loading" | "error"
+    pyannote: str  # "ready" | "loading" | "error"
+    whisper_detail: str | None = None
+    pyannote_detail: str | None = None
+    vram_used_mb: int | None = None
+
+
+class PipelineHealth(BaseModel):
+    """Pipeline lock block — defaults until Batch 5 wires the asyncio lock."""
+
+    lock_held: bool = False
+    active_job_id: str | None = None
+    queue_depth: int = 0
+
+
 class HealthResponse(BaseModel):
     """Response of `GET /health`. Reports liveness + DB + accelerator state."""
 
@@ -156,6 +265,8 @@ class HealthResponse(BaseModel):
     data_dir_writable: bool
     cache_entries: int
     db_reachable: bool
+    models: ModelsHealth
+    pipeline: PipelineHealth
 
 
 async def _ping_db(engine: Any) -> bool:
@@ -218,11 +329,30 @@ async def health(request: Request) -> HealthResponse:
 
     db_reachable = await _ping_db(request.app.state.engine)
 
+    state = request.app.state
+    vram_used_mb: int | None = None
+    if accel.vram_total_mb is not None and accel.vram_free_mb is not None:
+        vram_used_mb = max(accel.vram_total_mb - accel.vram_free_mb, 0)
+    models_health = ModelsHealth(
+        whisper=getattr(state, "whisper_status", "loading"),
+        pyannote=getattr(state, "pyannote_status", "loading"),
+        whisper_detail=getattr(state, "whisper_detail", None),
+        pyannote_detail=getattr(state, "pyannote_detail", None),
+        vram_used_mb=vram_used_mb,
+    )
+    pipeline_health = PipelineHealth(
+        lock_held=getattr(state, "pipeline_lock_held", False),
+        active_job_id=getattr(state, "pipeline_active_job_id", None),
+        queue_depth=getattr(state, "pipeline_queue_depth", 0),
+    )
+
     return HealthResponse(
         status="ok",
         version="0.1.0",
         data_dir_writable=_probe_data_dir_writable(),
         cache_entries=cache_entries,
         db_reachable=db_reachable,
+        models=models_health,
+        pipeline=pipeline_health,
         **_accelerator_to_health(accel),
     )
