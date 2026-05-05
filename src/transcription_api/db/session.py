@@ -52,6 +52,12 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     (e.g., connection already dead), the original business-error is preserved
     and the rollback failure is logged separately. Without this, Python loses
     the original traceback and the operator sees only the rollback failure.
+
+    CR-4: clear `session.info` armed flags (`user_id`, `scoping_bypass`) on
+    teardown. The factory creates a fresh AsyncSession per call (so today
+    no leak is possible — only connections are pooled), but defense-in-depth
+    is cheap: any future refactor that cached or reused a session would
+    otherwise inherit the previous request's user_id and silently leak data.
     """
     import logging
     _logger = logging.getLogger("transcription_api")
@@ -65,3 +71,6 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             except Exception:
                 _logger.exception("session_rollback_failed error_id=DB_ROLLBACK_FAILED")
             raise
+        finally:
+            session.info.pop("user_id", None)
+            session.info.pop("scoping_bypass", None)

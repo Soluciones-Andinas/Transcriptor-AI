@@ -1,6 +1,10 @@
 """Per-user query scoping enforcement.
 
 Spec: SPEC-capa1-postgres-orm-v1, review fix S-1.
+Capa 2 review CR-5: listener is now FAIL-CLOSED — a per-user query on a
+session that has neither `user_id` armed nor `scoping_bypass=True` raises
+`ScopingNotArmedError` instead of silently returning all rows.
+
 Module under test: src/transcription_api/db/scoping.py
 
 These tests prove the load-bearing invariant for Capa 6: even if a query
@@ -30,6 +34,7 @@ from transcription_api.db.models import (
     Transcription,
     UploadSession,
 )
+from transcription_api.db.scoping import ScopingNotArmedError, bypass_scoping
 
 pytestmark = pytest.mark.requires_docker
 
@@ -38,6 +43,14 @@ pytestmark = pytest.mark.requires_docker
 def _ensure_scoping_listener_installed():
     """Install the scoping listener (idempotent) before any test runs."""
     enable_per_user_scoping()
+
+
+@pytest.fixture(autouse=True)
+def _own_bypass(session):
+    """These tests verify the listener — opt out of the conftest's blanket
+    `scoping_bypass=True` so we can observe the fail-closed behavior."""
+    session.info.pop("scoping_bypass", None)
+    yield
 
 
 @pytest.mark.parametrize(
@@ -54,33 +67,38 @@ def _ensure_scoping_listener_installed():
 async def test_scoped_query_returns_only_active_user_rows(session, model, factory_kwargs):
     """
     Spec: SPEC-capa1-postgres-orm-v1, S-1.
+    Capa 2 review: CR-5 (fail-closed).
 
     For every per-user model, when `session.info["user_id"]` is set, a
     naive `select(Model)` returns only that user's rows — never the other
-    user's, no matter how the query is phrased.
+    user's, no matter how the query is phrased. With neither `user_id`
+    nor `scoping_bypass` set, the same query raises `ScopingNotArmedError`.
     """
-    alice = await make_user(session, email="alice@sandinas.test")
-    bob = await make_user(session, email="bob@sandinas.test")
-    bearer_alice = await make_bearer(session, user_id=alice.id)
-    bearer_bob = await make_bearer(session, user_id=bob.id)
-    tr_alice = await make_transcription(session, user_id=alice.id)
-    tr_bob = await make_transcription(session, user_id=bob.id)
+    # Factories use INSERT (not intercepted by the listener), so they
+    # succeed even without bypass. We do however need to insert under
+    # bypass so any internal SELECT-on-flush doesn't trip fail-closed.
+    with bypass_scoping(session):
+        alice = await make_user(session, email="alice@sandinas.test")
+        bob = await make_user(session, email="bob@sandinas.test")
+        bearer_alice = await make_bearer(session, user_id=alice.id)
+        bearer_bob = await make_bearer(session, user_id=bob.id)
+        tr_alice = await make_transcription(session, user_id=alice.id)
+        tr_bob = await make_transcription(session, user_id=bob.id)
 
-    if model is OAuthToken:
-        await make_oauth_token(session, user_id=alice.id)
-        await make_oauth_token(session, user_id=bob.id)
-    elif model is Image:
-        await make_image(session, transcription_id=tr_alice.id, user_id=alice.id)
-        await make_image(session, transcription_id=tr_bob.id, user_id=bob.id)
-    elif model is UploadSession:
-        await make_upload_session(session, user_id=alice.id, bearer_id=bearer_alice.id)
-        await make_upload_session(session, user_id=bob.id, bearer_id=bearer_bob.id)
-    # bearers and transcriptions already inserted above
+        if model is OAuthToken:
+            await make_oauth_token(session, user_id=alice.id)
+            await make_oauth_token(session, user_id=bob.id)
+        elif model is Image:
+            await make_image(session, transcription_id=tr_alice.id, user_id=alice.id)
+            await make_image(session, transcription_id=tr_bob.id, user_id=bob.id)
+        elif model is UploadSession:
+            await make_upload_session(session, user_id=alice.id, bearer_id=bearer_alice.id)
+            await make_upload_session(session, user_id=bob.id, bearer_id=bearer_bob.id)
 
-    # Without scoping: see both rows.
+    # Without scoping AND without bypass: must RAISE (CR-5 fail-closed).
     set_session_user(session, None)
-    unscoped = (await session.execute(select(model))).scalars().all()
-    assert len(unscoped) >= 2
+    with pytest.raises(ScopingNotArmedError):
+        await session.execute(select(model))
 
     # Scope to alice — must see ONLY her rows.
     set_session_user(session, alice.id)
@@ -99,26 +117,49 @@ async def test_scoped_query_returns_only_active_user_rows(session, model, factor
     )
 
 
-async def test_unscoped_session_sees_all_rows(session):
+async def test_unscoped_session_raises_fail_closed(session):
     """
     Spec: SPEC-capa1-postgres-orm-v1, S-1.
+    Capa 2 review: CR-5.
 
-    If `session.info["user_id"]` is not set (admin / migration context),
-    the listener is a no-op — queries return all rows regardless of
-    user_id. This is critical for cleanup jobs and Capa 1 tests.
+    A per-user query on a session with neither `user_id` nor
+    `scoping_bypass` set must raise `ScopingNotArmedError`. The OLD
+    contract (silently return all rows) was a silent-leak hazard: a
+    forgotten dependency in any future endpoint exposed every user's data.
     """
-    alice = await make_user(session)
-    bob = await make_user(session)
-    await make_transcription(session, user_id=alice.id)
-    await make_transcription(session, user_id=bob.id)
+    with bypass_scoping(session):
+        alice = await make_user(session)
+        bob = await make_user(session)
+        await make_transcription(session, user_id=alice.id)
+        await make_transcription(session, user_id=bob.id)
 
-    # Default state: no user_id in session.info.
     assert "user_id" not in session.info
-    rows = (await session.execute(select(Transcription))).scalars().all()
-    user_ids = {r.user_id for r in rows}
-    assert {alice.id, bob.id}.issubset(user_ids), (
-        f"unscoped session must see both users' rows; got user_ids={user_ids}"
-    )
+    assert "scoping_bypass" not in session.info  # popped by autouse fixture
+
+    with pytest.raises(ScopingNotArmedError):
+        await session.execute(select(Transcription))
+
+
+async def test_bypass_admin_pattern_sees_all_rows(session):
+    """
+    Spec: SPEC-capa1-postgres-orm-v1, S-1.
+    Capa 2 review: S-5.
+
+    Legitimate cross-user maintenance (cleanup jobs, admin reports, auth
+    lookups) wraps the query in `bypass_scoping(session)`. Inside the
+    block, queries return all rows regardless of user_id.
+    """
+    with bypass_scoping(session):
+        alice = await make_user(session)
+        bob = await make_user(session)
+        await make_transcription(session, user_id=alice.id)
+        await make_transcription(session, user_id=bob.id)
+
+        rows = (await session.execute(select(Transcription))).scalars().all()
+        user_ids = {r.user_id for r in rows}
+        assert {alice.id, bob.id}.issubset(user_ids), (
+            f"bypass_scoping must let queries see both users; got user_ids={user_ids}"
+        )
 
 
 async def test_scoping_does_not_filter_users_table(session):
@@ -127,12 +168,15 @@ async def test_scoping_does_not_filter_users_table(session):
 
     `users` does NOT carry a user_id column (the user_id IS the user.id).
     Scoping must NOT filter user lookups, otherwise authentication / lookup
-    flows break entirely.
+    flows break entirely. This is asserted explicitly here because the
+    fail-closed change (CR-5) relies on `_scoped_models()` correctly
+    excluding `users`.
     """
     from transcription_api.db.models import User
 
-    alice = await make_user(session)
-    await make_user(session)  # second user
+    with bypass_scoping(session):
+        alice = await make_user(session)
+        await make_user(session)  # second user
     set_session_user(session, alice.id)
 
     # Scoped session must still find alice and any other user (the listener
@@ -146,23 +190,21 @@ async def test_scoping_does_not_filter_users_table(session):
 async def test_scoping_bypass_flag(session):
     """
     Spec: SPEC-capa1-postgres-orm-v1, S-1.
+    Capa 2 review: S-5 (context manager wraps the same flag).
 
-    Legitimate cross-user maintenance (cleanup jobs, admin reports) needs
-    to bypass scoping even when a user_id is set. The escape hatch is
-    `session.info["scoping_bypass"] = True`.
+    `session.info["scoping_bypass"] = True` (or `bypass_scoping(session)`)
+    must override scoping even when a `user_id` is armed.
     """
-    alice = await make_user(session)
-    bob = await make_user(session)
-    await make_transcription(session, user_id=alice.id)
-    await make_transcription(session, user_id=bob.id)
+    with bypass_scoping(session):
+        alice = await make_user(session)
+        bob = await make_user(session)
+        await make_transcription(session, user_id=alice.id)
+        await make_transcription(session, user_id=bob.id)
 
     set_session_user(session, alice.id)
-    session.info["scoping_bypass"] = True
-    try:
+    with bypass_scoping(session):
         rows = (await session.execute(select(Transcription))).scalars().all()
         user_ids = {r.user_id for r in rows}
         assert {alice.id, bob.id}.issubset(user_ids), (
             "scoping_bypass=True must let queries see all users"
         )
-    finally:
-        del session.info["scoping_bypass"]
