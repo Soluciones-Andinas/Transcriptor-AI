@@ -37,7 +37,7 @@ WORKDIR /app
 # cambio de código invalida la layer de install. Para este proyecto con
 # deps estables y src/ chico, es aceptable. Si deps crecen, mover a un
 # patrón requirements.txt-first.
-COPY pyproject.toml README.md ./
+COPY pyproject.toml ./
 COPY src/ ./src/
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
