@@ -44,8 +44,21 @@ def _docker_daemon_reachable() -> bool:
     return result.returncode == 0
 
 
+def _ffmpeg_available() -> bool:
+    """Return True if both ``ffmpeg`` and ``ffprobe`` resolve on PATH.
+
+    Used to auto-skip ``requires_ffmpeg``-marked tests on machines without
+    ffmpeg installed. The Capa 3 pipeline shells out to both binaries
+    (normalize via ffmpeg, duration via ffprobe), so missing either is
+    enough to treat the marker as unsupported.
+    """
+    import shutil
+
+    return bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Skip ``requires_gpu``/``requires_docker`` tests when the host can't run them."""
+    """Skip ``requires_*`` tests when the host can't run them."""
     from transcription_api.gpu import detect_accelerator
 
     accel = detect_accelerator()
@@ -65,11 +78,20 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         else None
     )
 
+    ffmpeg_ok = _ffmpeg_available()
+    skip_no_ffmpeg = (
+        pytest.mark.skip(reason="ffmpeg/ffprobe not on PATH; install ffmpeg to run")
+        if not ffmpeg_ok
+        else None
+    )
+
     for item in items:
         if skip_no_gpu and "requires_gpu" in item.keywords:
             item.add_marker(skip_no_gpu)
         if skip_no_docker and "requires_docker" in item.keywords:
             item.add_marker(skip_no_docker)
+        if skip_no_ffmpeg and "requires_ffmpeg" in item.keywords:
+            item.add_marker(skip_no_ffmpeg)
 
 
 # ---------------------------------------------------------------------------
