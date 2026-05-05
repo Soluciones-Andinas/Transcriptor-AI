@@ -211,21 +211,30 @@ Patrón Node-style "copy manifest → install deps → copy code" para maximizar
 > wiki drifts para hacer correciones luego") las correcciones al wiki se
 > defieren a una sesión dedicada. Estas entradas son la lista accionable.
 
-### D-013 🟠 RF-AUTH-02 status code: spec dice 200, implementación devuelve 302
+### D-013 🟢 [CERRADO — wiki ya correcto] RF-AUTH-02 status code: SPEC drift, NO wiki drift
 
-**Asumido (RF-AUTH-02 / SPEC-capa2-auth-msentra-v1)**: la response a `GET /auth/callback` debe ser HTTP 200 con `Set-Cookie: session=...` y body con shape `{ user, bearer, mcp_url }`.
+**Asumido (cuando se escribió esta entrada)**: el SPEC interno
+`docs/sesiones/2026-05-05-capa2-auth-spec.md` decía 200; la wiki
+`wiki/RF/RF-AUTH.md` también decía 200; la implementación devolvía 302.
 
-**Reality**: la implementación devuelve `HTTP 302 → /mcp-setup` con `Set-Cookie: session=...` + flash. Esto es el patrón estándar de OAuth web (post-callback redirect a la SPA), preferido sobre 200-with-body porque:
-1. Si el cliente sigue redirects, aterriza en `/mcp-setup` con cookies seteadas listas para `GET /auth/me`.
-2. Body 200 al callback obliga al SPA a leer JSON de la respuesta del callback, que es awkward — el callback típicamente se navega como página, no se fetchea como API.
+**Reality (verificación 2026-05-05 sesión wiki dedicada)**: la wiki
+**ya decía 302** desde el refactor 2.0 (RF-AUTH.md líneas 13 y 160 —
+"302 redirect a /mcp-setup", "Responder 302 a /mcp-setup con Set-Cookie
+session"). Solo el SPEC interno temporal divergía. La wiki nunca tuvo el
+bug; mi entrada original de drift estaba basada en una mis-lectura del
+estado de la wiki.
 
-**Resolución elegida (CR-6, instrucción explícita Franco)**: mantener 302. Wiki debe corregirse para reflejar el contrato real.
+**Resolución elegida (CR-6, instrucción explícita Franco)**: mantener
+302 en código + spec. Sin acción wiki necesaria (wiki ya correcta).
 
-**Acción pendiente sobre wiki**:
-- `wiki/RF/RF-AUTH.md` RF-AUTH-02: cambiar el status code de respuesta del callback de 200 a 302 con Location: /mcp-setup. Documentar que el body shape `{ user, bearer, mcp_url }` ahora se sirve por `GET /auth/me` (RF-AUTH-06), no por el callback. Tests integration ya validan 302 + Location.
-- `wiki/06_matriz_pruebas_RF.md`: actualizar la fila de AC-8 si se refiere al status del callback.
+**Acción pendiente sobre wiki**: ninguna. (Originalmente listada como
+"cambiar 200→302" pero la verificación mostró que no aplica).
 
-**Lección**: specs deberían modelar OAuth flows como secuencia de redirects, no como una sola request/response. El "happy path" de OAuth es naturalmente 3+ saltos.
+**Lección**: cuando se documenta un drift, validar el estado actual de
+la wiki/spec/código antes de listar acciones. Asumir el contenido del
+file sin abrirlo lleva a entradas falsas en el log; el log pierde
+credibilidad cuando el lector futuro descubre que "la acción ya estaba
+hecha desde antes".
 
 ---
 
@@ -443,32 +452,170 @@ es un default robusto, no over-engineering.
 
 ---
 
+## Categoría 8 — Drifts del deployment al rig (operacionales, 2026-05-05)
+
+> Estas drifts surgieron durante el primer levantamiento real de la imagen
+> Docker en el rig RTX 4060 Ti, después del merge de Capa 2 a master. Son
+> bugs / asunciones que pasaron desapercibidos en dev local porque la
+> superficie de validación (pytest contra la `.venv` con `[dev]` extras)
+> no ejerce las mismas paths que `pip install .` dentro de un container.
+> Capturadas para que futuros deployments no las repitan + para informar
+> el "deployment runbook" de Capa 7 cuando exista.
+
+### D-031 🟠 logging.json access formatter: campos `client_addr` / `request_line` / `status_code` no existen en uvicorn LogRecord
+
+**Asumido (`src/transcription_api/logging.json` original Capa 1)**:
+```json
+"access": {
+  "format": "%(asctime)s %(levelname)s access %(client_addr)s \"%(request_line)s\" %(status_code)s"
+}
+```
+La asunción era que el `uvicorn.access` logger emite LogRecords con
+atributos nombrados `client_addr`, `request_line`, `status_code`.
+
+**Reality (logs del primer arranque en rig 2026-05-05)**: uvicorn emite
+los datos como argumentos posicionales dentro del template del mensaje
+(`'%s - "%s %s HTTP/%s" %d', client_addr, method, path, version, status`)
+y el LogRecord NO tiene esos atributos como `record.client_addr` etc. El
+formatter custom raise `KeyError: 'client_addr'` en cada GET /health,
+contaminando el stdout con un traceback completo por request HTTP exitoso.
+La request en sí seguía funcionando (status 200, body correcto); solo
+el handler de logging emitía el error.
+
+**Resolución (commit `6dcacc4`)**: cambio del format a
+`"%(asctime)s %(levelname)s access %(message)s"` que usa el message
+template ya formateado por uvicorn. Output ahora limpio:
+`2026-05-05 18:35:29 INFO access 127.0.0.1:43932 - "GET /health HTTP/1.1" 200`.
+
+**Acción pendiente**: ninguna. Cubierto en el commit del rig fix.
+
+**Lección**: la review multi-agente NO detecta bugs en archivos de
+configuración (logging.json, .env, Dockerfile) porque esos files están
+fuera del análisis de código Python. Para futuras capas, considerar un
+smoke test post-build dentro del container que ejecute al menos
+`GET /health` y grep ausencia de tracebacks en stderr antes de declarar
+la imagen "verde". Sin esto, el bug solo aparece en runtime real.
+
+---
+
+### D-032 🟠 `httpx` declarado en `[dev]` extras pero usado en runtime por `oauth_client`
+
+**Asumido (`pyproject.toml` original Capa 1)**:
+```toml
+[project.optional-dependencies]
+dev = [
+    ...
+    "httpx>=0.27.0",  # FastAPI test client + tests respx
+    ...
+]
+```
+Capa 1 no usaba `httpx` en runtime (FastAPI usa Starlette internamente,
+no necesita httpx). `[dev]` extras lo trae para que pytest pueda usar
+`AsyncClient` + `respx` en tests. Funcionaba localmente porque la
+`.venv` se instala con `pip install -e ".[dev]"`.
+
+**Reality (logs del primer build en rig 2026-05-05)**:
+```
+ModuleNotFoundError: No module named 'httpx'
+  File "src/transcription_api/auth/routes.py", line 47, in <module>
+    from .oauth_client import (...)
+  File "src/transcription_api/auth/oauth_client.py", line 33, in <module>
+    import httpx
+```
+Capa 2 introdujo `auth/oauth_client.py` que usa `httpx.AsyncClient`
+**en runtime** (para llamar `/token` y `/discovery/v2.0/keys` de MS).
+Esto se omitió al promoverlo de "uso en tests" a "uso en producción".
+La imagen Docker instala solo el core (`pip install .` sin extras),
+así que el container crash-loopaba en el `from .auth import router`
+durante startup.
+
+**Resolución (commit `d034b51`)**: promover `httpx>=0.27.0` del
+extras `[dev]` al `dependencies` core. La duplicación en `[dev]`
+quedó (pip dedupea automáticamente, no rompe nada).
+
+**Acción pendiente**: ninguna. Para Capa 3+, agregar al checklist de
+PR review pre-merge: si un módulo nuevo importa una lib de `[dev]`
+extras, mover a core ANTES del merge.
+
+**Lección**: el tipo de drift "passes locally fails in container" es
+recurrente cuando la dev box tiene más deps instaladas que la imagen
+prod. Un CI step que haga `pip install .` (sin extras) + import del
+package raíz en una imagen limpia hubiera atrapado esto sin necesidad
+de rig deployment. Considerar agregar al .github/workflows o equivalente
+cuando se introduzca CI.
+
+---
+
+### D-033 🟡 `POST GRES_PASSWORD` se hornea en el volume al primer `initdb`; cambios en `.env` no rotan la auth
+
+**Asumido (operador siguiendo el deployment guide)**: cambiar
+`POSTGRES_PASSWORD` en `.env` y reiniciar `docker compose` propaga la
+nueva password al servicio de Postgres.
+
+**Reality (primer `alembic upgrade head` en rig 2026-05-05)**:
+```
+psycopg.OperationalError: FATAL: password authentication failed for user "transcription"
+```
+El image oficial de `postgres:16-alpine` solo aplica `POSTGRES_USER` /
+`POSTGRES_PASSWORD` durante `initdb` (primer arranque del volume vacío).
+Una vez el volume tiene data, la imagen ignora esos env vars y la auth
+se chequea contra el password original baked into `pg_hba.conf` +
+`pg_authid`. Si el operador inicializó el volume con un placeholder
+(`change-me-in-production`) y después cambió `.env` al password real,
+el cluster sigue auth-eando con el placeholder.
+
+**Resolución (workaround dev)**:
+```bash
+docker compose down -v   # -v borra el named volume postgres-data
+docker compose up -d postgres   # initdb corre fresh con .env actual
+```
+Solo seguro en dev (data se pierde). En prod la rotación correcta es
+`ALTER USER ... PASSWORD '...';` con superuser dentro del cluster
+running.
+
+**Acción pendiente**:
+- Documentar en el deployment runbook (Capa 7) los dos casos:
+  primer-arranque vs rotación.
+- Considerar agregar al `entrypoint.sh` de la imagen un check que
+  emita un WARN si `POSTGRES_PASSWORD` del `.env` difiere del que
+  realmente acepta el cluster (no es trivial; podría ser un test
+  de connection con timeout).
+
+**Lección**: las imágenes oficiales de bases de datos tienen un
+contrato de "init-once, operate-forever" que el operador novato no
+intuye. Cualquier env var marcada como "credentials" en las imágenes
+oficiales (Postgres, MySQL, MongoDB, Redis) tiene esta misma semántica.
+El runbook de deployment debe ser explícito al respecto desde el día
+uno.
+
+---
+
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 24 (10 de Capa 2 + 2 de Capa 3 Batch 1).
+**Total drifts identificados**: 27 (10 de Capa 2 review + 2 de Capa 3 Batch 1 + 3 operacionales del primer rig deployment).
 
-**Severidad**:
+**Severidad** (post-actualización 2026-05-05 sesión wiki + drifts deployment):
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
-- 🟠 HIGH: 5 (D-002, D-004, D-006, D-007, D-009, D-013)
-- 🟡 MEDIUM: 11 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030)
-- 🟢 LOW: 4 (D-012, D-019, D-020, D-022)
+- 🟠 HIGH: 6 (D-002, D-004, D-006, D-007, D-009, D-031, D-032)
+- 🟡 MEDIUM: 13 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033)
+- 🟢 LOW: 5 (D-012, D-013, D-019, D-020, D-022)
 
-**Drifts ya cerrados**: 16/24.
+**Drifts ya cerrados**: 22/27.
+- **Cerrados en wiki esta sesión** (commits `60795ab..00d25ad` en branch `feat/capa3-pipeline`): D-014 (ADR-015 supersedes ADR-014), D-016 (RF-AUTH-01 multi-tab), D-017 (RF-AUTH-08 banner UI), D-018 (RF-MCP-00 contract anchor).
+- **D-013**: confirmado como falso drift (wiki ya correcta) — entrada actualizada arriba.
+- **D-031, D-032**: cerrados en código (commits `6dcacc4` logging fix + `d034b51` httpx promotion).
 
 **Drifts pendientes de cierre (acciones concretas)**:
 
 | ID | Acción | Tipo | Cuándo |
 |----|--------|------|--------|
-| D-010 | `/graphify --update` post-Capa 2 fix | proceso | tras cerrar este fix-cycle |
-| D-013 | RF-AUTH-02: 200→302 + body delegado a /auth/me | wiki | sesión wiki dedicada |
-| D-014 | ADR-015 superseding ADR-014 + 05_modelo_datos | wiki | sesión wiki dedicada |
-| D-016 | RF-AUTH-01 multi-tab note | wiki | sesión wiki dedicada |
-| D-017 | RF-AUTH-08 banner UI bearer estado | wiki | sesión wiki dedicada |
-| D-018 | RF-MCP-00 stub | wiki | sesión wiki dedicada |
-| D-019 | Encryption key rotation versioning | code | post-Capa 6 o auditoría |
-| D-020 | last_used_at throttle 5 min | code | bajo Capa 6 carga real |
-| D-021 | Test sub-app fixture refactor | tests | pre-Capa 6 |
-| D-022 | Callback service extraction | refactor | cuando crezca |
+| D-010 | `/graphify --update` post-Capa 2 + Capa 3 fixes | proceso | tras cerrar Capa 3 Batch 1 |
+| D-019 | Encryption key rotation versioning (key-id prefix) | code | post-Capa 6 o auditoría externa |
+| D-020 | `mcp_bearers.last_used_at` throttle 5 min | code | cuando Capa 6 muestre carga real |
+| D-021 | Test sub-app fixture refactor (sacar `/_test_mcp_*` del prod app) | tests | pre-Capa 6 |
+| D-022 | Callback service extraction (`auth/callback_service.py`) | refactor | cuando el handler vuelva a crecer |
+| D-033 | Documentar Postgres password rotation en deployment runbook | docs | Capa 7 (deployment runbook) |
+| D-026, D-027, D-028 | Wiki edits Capa 3 (REST entry, per-user cache, lazy pyannote) | wiki | post-merge Capa 3 a master |
 
 **Pattern emergente para futuras capas**:
 1. Antes de cerrar specs/ADRs, validar las asunciones físicas (hardware, lib semantics, dialect-specific types) con un experimento mínimo.
@@ -478,3 +625,5 @@ es un default robusto, no over-engineering.
 5. **Defaults de seguridad fail-closed; el bypass siempre es explícito (context manager, no flag inline).**
 6. **Reviews multi-agente sin context-poisoning capturan invariantes de seguridad que el implementador deja fail-open por inercia.**
 7. **Drifts de RFs/ADRs descubiertos en review se anotan en este log y se baja una sesión wiki dedicada — no se pisan los specs en caliente.**
+8. **Drifts operacionales del primer deployment (D-031, D-032, D-033) no son atrapables por reviews de código** — solo aparecen al ejecutar `pip install .` (sin `[dev]`) dentro de la imagen y arrancar el container. Considerar smoke test post-build como parte del pipeline CI.
+9. **Validar el contenido actual de wiki/spec antes de listar acciones de drift** — evita entradas falsas como D-013 que quedan listadas como pendientes pero ya estaban resueltas (lección post D-013).
