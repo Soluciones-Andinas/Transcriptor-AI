@@ -25,6 +25,9 @@ from .crypto import encrypt_token
 from .flash import set_bearer_flash
 from .mcp_bearer import generate_bearer
 from .oauth_client import (
+    OAuthCodeInvalid,
+    OAuthProviderUnavailable,
+    TenantNotAllowed,
     build_authorize_url,
     exchange_code,
     fetch_jwks,
@@ -104,11 +107,38 @@ async def callback(
     code_verifier = state_payload["code_verifier"]
 
     # 2. Exchange code for tokens (RF-AUTH-02 step 3).
-    token_response = await exchange_code(code=code, code_verifier=code_verifier)
+    # RF-AUTH-05: 5xx / network failure → AUTH_PROVIDER_UNAVAILABLE.
+    # RF-AUTH-02 ERR: 4xx (invalid_grant, expired code) → AUTH_INVALID_OAUTH_CODE.
+    try:
+        token_response = await exchange_code(code=code, code_verifier=code_verifier)
+    except OAuthProviderUnavailable:
+        logger.warning("auth_provider_unavailable error_id=AUTH_PROVIDER_UNAVAILABLE")
+        return RedirectResponse(
+            url="/login?error=AUTH_PROVIDER_UNAVAILABLE", status_code=302,
+        )
+    except OAuthCodeInvalid:
+        logger.warning("auth_invalid_oauth_code error_id=AUTH_INVALID_OAUTH_CODE")
+        return RedirectResponse(
+            url="/login?error=AUTH_INVALID_OAUTH_CODE", status_code=302,
+        )
 
     # 3. Validate id_token (RF-AUTH-02 step 5 / RF-AUTH-03).
-    jwks = await fetch_jwks()
-    claims = validate_id_token(token_response["id_token"], jwks)
+    # RF-AUTH-03: tid mismatch → AUTH_TENANT_NOT_ALLOWED (regression of Privacy if missed).
+    try:
+        jwks = await fetch_jwks()
+        claims = validate_id_token(token_response["id_token"], jwks)
+    except TenantNotAllowed:
+        logger.warning("auth_tenant_not_allowed error_id=AUTH_TENANT_NOT_ALLOWED")
+        return RedirectResponse(
+            url="/login?error=AUTH_TENANT_NOT_ALLOWED", status_code=302,
+        )
+    except OAuthProviderUnavailable:
+        logger.warning(
+            "auth_provider_unavailable error_id=AUTH_PROVIDER_UNAVAILABLE source=jwks",
+        )
+        return RedirectResponse(
+            url="/login?error=AUTH_PROVIDER_UNAVAILABLE", status_code=302,
+        )
 
     # 4. Extract identity (RF-AUTH-02 step 6).
     ms_oid = uuid.UUID(claims["oid"])

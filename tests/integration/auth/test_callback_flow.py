@@ -255,6 +255,162 @@ async def test_callback_subsequent_login_updates_only(client, session):
 # ---------------------------------------------------------------------------
 # AC-19 / T9 — verify tokens stored encrypted (no plaintext leak)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# AC-10 / T10 — state mismatch (RF-AUTH-02 ERR AUTH_INVALID_STATE)
+# ---------------------------------------------------------------------------
+async def test_callback_state_mismatch_redirects_with_error(client, session):
+    """
+    Spec: SPEC-capa2-auth-msentra-v1
+    Criterion: AC-10 — cookie oauth_state.state != query state → 302 a
+    /login?error=AUTH_INVALID_STATE. NO se crea ningun row en DB.
+    """
+    from sqlalchemy import func
+
+    from transcription_api.db.models import OAuthToken, User
+
+    # Drive a normal /auth/login to obtain a valid signed cookie.
+    state_real, cookies = await _drive_login_and_get_state(client)
+
+    # But hit /auth/callback with a DIFFERENT state value.
+    bogus_state = "x" * len(state_real)
+    assert bogus_state != state_real
+    r = await client.get(
+        f"/auth/callback?code=fake-code&state={bogus_state}", cookies=cookies,
+    )
+
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login?error=AUTH_INVALID_STATE"
+
+    # No DB writes: no users, no tokens, no bearers.
+    n_users = (await session.execute(select(func.count()).select_from(User))).scalar_one()
+    n_tokens = (await session.execute(select(func.count()).select_from(OAuthToken))).scalar_one()
+    assert n_users == 0
+    assert n_tokens == 0
+
+
+async def test_callback_missing_state_cookie_redirects_with_error(client, session):
+    """
+    Spec: SPEC-capa2-auth-msentra-v1
+    Criterion: AC-10 — sin cookie oauth_state (user pegó URL directo) →
+    302 a /login?error=AUTH_INVALID_STATE.
+    """
+    r = await client.get("/auth/callback?code=fake-code&state=anystate")
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login?error=AUTH_INVALID_STATE"
+
+
+# ---------------------------------------------------------------------------
+# AC-11 / T11 — tenant rechazado (RF-AUTH-03)
+# ---------------------------------------------------------------------------
+@respx.mock
+async def test_callback_foreign_tenant_redirects_with_error(client, session):
+    """
+    Spec: SPEC-capa2-auth-msentra-v1
+    Criterion: AC-11 — id_token.tid != MS_TENANT_ID → 302 a
+    /login?error=AUTH_TENANT_NOT_ALLOWED. NO se crea user.
+    """
+    from sqlalchemy import func
+
+    from transcription_api.config import settings
+    from transcription_api.db.models import User
+
+    priv, pub = _generate_rsa_keypair()
+    foreign_tid = str(uuid.uuid4())  # any UUID != settings.ms_tenant_id
+    assert foreign_tid != settings.ms_tenant_id
+
+    id_token = _build_id_token(
+        priv,
+        ms_tenant_id=settings.ms_tenant_id,  # iss uses configured tenant (sig valid)
+        ms_client_id=settings.ms_client_id,
+        oid=str(uuid.uuid4()),
+        email="evil@othertenant.example",
+        tid_override=foreign_tid,  # override so claims.tid != configured
+    )
+    respx.get(
+        f"https://login.microsoftonline.com/{settings.ms_tenant_id}/discovery/v2.0/keys"
+    ).mock(return_value=Response(200, json=_jwks_from_pub(pub)))
+    respx.post(
+        f"https://login.microsoftonline.com/{settings.ms_tenant_id}/oauth2/v2.0/token"
+    ).mock(return_value=Response(200, json={
+        "access_token": "ACCESS",
+        "refresh_token": "REFRESH",
+        "id_token": id_token,
+        "expires_in": 3600,
+        "token_type": "Bearer",
+    }))
+
+    state, cookies = await _drive_login_and_get_state(client)
+    r = await client.get(
+        f"/auth/callback?code=fake-code&state={state}", cookies=cookies,
+    )
+
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login?error=AUTH_TENANT_NOT_ALLOWED"
+
+    # NO user created: tenant validation aborts before DB writes.
+    n_users = (await session.execute(select(func.count()).select_from(User))).scalar_one()
+    assert n_users == 0
+
+
+# ---------------------------------------------------------------------------
+# AC-12 / T12 — MS unavailable (RF-AUTH-05 AUTH_PROVIDER_UNAVAILABLE)
+# ---------------------------------------------------------------------------
+@respx.mock
+async def test_callback_ms_unavailable_redirects_with_error(client, session):
+    """
+    Spec: SPEC-capa2-auth-msentra-v1
+    Criterion: AC-12 — MS Entra retorna 5xx → 302 a
+    /login?error=AUTH_PROVIDER_UNAVAILABLE.
+    """
+    from sqlalchemy import func
+
+    from transcription_api.config import settings
+    from transcription_api.db.models import User
+
+    respx.post(
+        f"https://login.microsoftonline.com/{settings.ms_tenant_id}/oauth2/v2.0/token"
+    ).mock(return_value=Response(503, text="Service Unavailable"))
+
+    state, cookies = await _drive_login_and_get_state(client)
+    r = await client.get(
+        f"/auth/callback?code=fake-code&state={state}", cookies=cookies,
+    )
+
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login?error=AUTH_PROVIDER_UNAVAILABLE"
+
+    n_users = (await session.execute(select(func.count()).select_from(User))).scalar_one()
+    assert n_users == 0
+
+
+@respx.mock
+async def test_callback_ms_invalid_code_redirects_with_error(client, session):
+    """
+    Spec: SPEC-capa2-auth-msentra-v1
+    Criterion: AC-12 (variant) — MS retorna 4xx (invalid_grant) → 302 a
+    /login?error=AUTH_INVALID_OAUTH_CODE.
+    """
+    from transcription_api.config import settings
+
+    respx.post(
+        f"https://login.microsoftonline.com/{settings.ms_tenant_id}/oauth2/v2.0/token"
+    ).mock(return_value=Response(400, json={
+        "error": "invalid_grant",
+        "error_description": "AADSTS70008: refresh token is invalid",
+    }))
+
+    state, cookies = await _drive_login_and_get_state(client)
+    r = await client.get(
+        f"/auth/callback?code=expired&state={state}", cookies=cookies,
+    )
+
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login?error=AUTH_INVALID_OAUTH_CODE"
+
+
+# ---------------------------------------------------------------------------
+# AC-19 / T9 — verify tokens stored encrypted (no plaintext leak)
+# ---------------------------------------------------------------------------
 @respx.mock
 async def test_oauth_tokens_stored_encrypted_not_plaintext(client, session):
     """
