@@ -382,17 +382,78 @@ y montar en una mini app con la dependencia `Depends(get_current_user_mcp)`.
 
 ---
 
+### D-029 🟡 Capa 3 Batch 1: single-stage Dockerfile elegido vs multi-stage del plan
+
+**Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-plan.md` Task 1.1)**: el GREEN
+del Dockerfile usa un patrón multi-stage (`builder` con `nvidia/cuda:...-devel`,
+`runtime` con `nvidia/cuda:...-runtime`) para no arrastrar compilers al runtime.
+
+**Reality (este commit)**: el `Dockerfile` ya existía single-stage con justificación
+in-place ("Single-stage build: la imagen runtime ya pesa ~5 GB por CUDA, multi-stage
+no aporta"). Con `[pipeline]` extras la imagen final pesa ~10-12 GB; el ahorro
+multi-stage de ~1-2 GB de compilers es marginal frente a la complejidad adicional
+de una segunda stage + COPY explícito de site-packages.
+
+**Resolución (commit `52f8de5`)**: mantener single-stage. Agregar pre-install de
+torch+torchaudio con `--extra-index-url cu121` y luego `pip install ".[pipeline]"`.
+Comment del Dockerfile actualizado para anotar el trade-off (CLAUDE.md §4 priority:
+Simplicity > Performance).
+
+**Acción pendiente**: ninguna. Si el rig en Task 7.3 reporta un build > 12 GB que
+duele en transferencias, reconsiderar multi-stage en una sesión específica con
+nuevo ADR.
+
+**Lección**: cuando un plan propone una técnica (multi-stage), revisar si el costo
+real (size, complexity) la justifica con la decision priority del proyecto antes
+de aplicar literalmente. El plan es hipótesis; el código en producción es el voto
+definitivo. Documentar el voto en este log evita que un futuro lector crea que
+hubo descuido.
+
+---
+
+### D-030 🟡 Capa 3 Batch 1: heavy ML imports (torch, whisperx, pyannote) son lazy en `pipeline/{stt,diarize}.py`
+
+**Asumido (plan T1.2 RED test)**: los tests patcheaban
+`transcription_api.pipeline.stt.whisperx.load_model` y
+`transcription_api.pipeline.diarize.Pipeline.from_pretrained`, lo que requiere
+que `whisperx` y `pyannote.audio` estén importados al top del módulo.
+
+**Reality (este commit)**: las dev/CI machines son CPU-only y no tienen
+`[pipeline]` extras instalados (D-008 ya lo señaló para subagents; aquí se
+extiende a la suite local). Importar `whisperx` o `pyannote.audio` al top del
+módulo rompería el `import transcription_api.pipeline.stt` en cualquier máquina
+sin extras, lo que a su vez rompería `tests/unit/pipeline/test_model_loaders.py`
+y el `from .pipeline import stt` en `main.py`.
+
+**Resolución (commit `5b9a9ff`)**: introduzco indirecciones internas
+`_whisperx_load_model(...)` (en `stt.py`) y `_pyannote_from_pretrained(...)`
+(en `diarize.py`) que importan la lib pesada dentro del cuerpo de la función.
+Los tests patchean estas indirecciones en lugar de la lib upstream. El módulo
+es importable sin `[pipeline]` extras; sólo invocar el loader requiere la lib.
+
+**Acción pendiente**: ninguna inmediata. Los Batches 3-5 deben mantener el
+mismo patrón cuando agreguen wrappers `transcribe`, `diarize`, `merge` (las
+indirecciones siempre dentro de `pipeline.*`, nunca en `main.py` ni en
+`api/transcriptions.py`).
+
+**Lección**: planes que asumen heavy imports al top funcionan en la dev box
+del autor pero rompen en CI / en máquinas magras. Cuando el extras está
+gated por hardware (GPU), priorizar lazy imports + indirección patcheable
+es un default robusto, no over-engineering.
+
+---
+
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 22 (de los cuales 10 corresponden al review Capa 2).
+**Total drifts identificados**: 24 (10 de Capa 2 + 2 de Capa 3 Batch 1).
 
 **Severidad**:
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
 - 🟠 HIGH: 5 (D-002, D-004, D-006, D-007, D-009, D-013)
-- 🟡 MEDIUM: 9 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021)
+- 🟡 MEDIUM: 11 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030)
 - 🟢 LOW: 4 (D-012, D-019, D-020, D-022)
 
-**Drifts ya cerrados**: 14/22.
+**Drifts ya cerrados**: 16/24.
 
 **Drifts pendientes de cierre (acciones concretas)**:
 

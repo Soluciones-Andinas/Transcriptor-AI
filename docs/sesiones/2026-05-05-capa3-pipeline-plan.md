@@ -583,13 +583,13 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 | SPEC-capa3 | AC-6 | `test_orchestrator_lock_serializes_two_jobs` | [ ] |
 | SPEC-capa3 | AC-7 | `test_lock_released_on_gpu_error` + `test_stt_maps_cuda_oom_to_gpu_error` | [ ] |
 | SPEC-capa3 | AC-8 | `test_get_returns_404_for_other_user` | [ ] |
-| SPEC-capa3 | AC-9 | `test_health_reports_models_ready_after_lifespan` | [ ] |
+| SPEC-capa3 | AC-9 | `test_health_reports_models_ready_after_lifespan` + `test_load_whisper_returns_object_with_transcribe` | [x] |
 | SPEC-capa3 | AC-10 | `test_cleanup_purges_expired_entries` | [ ] |
 | SPEC-capa3 | AC-11 | `test_orchestrator_pipeline_timeout` | [ ] |
 | SPEC-capa3 | AC-12 | `test_cache_writes_and_reads_per_user` | [ ] |
 | SPEC-capa3 | AC-13 | `test_get_returns_full_result_for_owner` | [ ] |
 | SPEC-capa3 | AC-14 | E2E rig smoke (manual, registrar en `vram-budget.md`) | [ ] |
-| SPEC-capa3 | AC-15 | `test_pyannote_load_failure_keeps_service_up` + `test_post_returns_503_when_pyannote_failed_to_load` | [ ] |
+| SPEC-capa3 | AC-15 | `test_health_reports_pyannote_error_when_load_fails` + `test_load_pyannote_classifies_*` (4 tests) — 503 propagation deferred to Batch 6 (`test_post_returns_503_when_pyannote_failed_to_load`) | [x] (load failure surface) / [ ] (POST 503) |
 
 ---
 
