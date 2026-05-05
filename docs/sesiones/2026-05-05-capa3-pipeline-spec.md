@@ -40,6 +40,8 @@
 ### 0.4 Drifts vs wiki (loguear durante implementación)
 
 - **D-026 (futuro)**: la wiki asume MCP tools como entry point para el pipeline (RF-MCP-02 `start_transcription`); Capa 3 expone REST directo `POST /api/transcriptions` para desbloquear desarrollo sin MCP. Capa 4 envuelve el mismo orchestrator con MCP tools sin cambiar la lógica.
+- **D-027 (futuro)**: la wiki implícitamente asume cache shared entre users (1 corrida por `audio_hash` global). Capa 3 hace cache **per-user** keyed por `(user_id, audio_hash)`. Decisión Franco: "no lo hagamos robusto por ahora, si se sube mismo nombre o mismo contenido se guarda todo y 2 rows". Trade-off: más cómputo redundante (≤5 transcripciones/día en Sandinas, despreciable), zero risk de leak entre users, lock simple.
+- **D-028 (futuro)**: HF_TOKEN inválido NO impide arrancar el service. La wiki sugiere fail-fast, Capa 3 va con lazy + verbose error en `/health.models.pyannote = "error"` y 503 explícito al request POST. Razón: facilita troubleshooting, no necesitamos "service down" como signal global cuando otros endpoints (auth, /health) sirven independientemente.
 
 ---
 
@@ -142,7 +144,7 @@ ffmpeg normalize → /data/uploads/<random-id>.normalized.wav (16 kHz mono)
 Compute audio_hash = SHA-256(normalized_wav_bytes)
   │
   ▼
-Cache lookup at /data/cache/<audio_hash>/result.json
+Cache lookup at /data/cache/<user_id>/<audio_hash>/result.json (PER-USER, D-027)
   ├── HIT: read JSON → SKIP pipeline → INSERT row in transcriptions → return
   │
   └── MISS:
@@ -156,7 +158,7 @@ Cache lookup at /data/cache/<audio_hash>/result.json
      Merge: assign each word to a speaker → segments
        ▼
      Persist:
-       1. /data/cache/<audio_hash>/result.json (filesystem cache)
+       1. /data/cache/<user_id>/<audio_hash>/result.json (filesystem cache PER-USER, D-027)
        2. INSERT into transcriptions (Postgres, user_id armado)
   ▼
 Release lock
@@ -183,20 +185,20 @@ Cleanup raw upload + normalized WAV (always, finally block)
 | ID | Criterio | RF |
 |---|---|---|
 | AC-1 | Given bearer válido + mp3 nuevo, When POST `/api/transcriptions`, Then 200 + JSON con `transcription_id`, `segments`, `audio_hash`. Row en `transcriptions` con `user_id = bearer.user_id`. Cache filesystem creado. | RF-TRX-01 |
-| AC-2 | Given bearer válido + mp3 idéntico subido recientemente, When POST `/api/transcriptions`, Then 200 + JSON marcado `cache_hit: true`, NO se invocó Whisper ni pyannote (assertion vía mock o latencia <500 ms). Row nuevo en `transcriptions` igual (cada user mantiene su histórico). | RF-TRX-02 |
+| AC-2 | Given bearer válido + mp3 idéntico **subido por el mismo user** recientemente, When POST `/api/transcriptions`, Then 200 + JSON marcado `cache_hit: true`, NO se invocó Whisper ni pyannote (assertion vía mock o latencia <500 ms). Row nuevo en `transcriptions` igual (el histórico crece, el cómputo no se repite). | RF-TRX-02 |
 | AC-3 | Given sin Authorization header, When POST, Then 401 `AUTH_NOT_AUTHENTICATED`. | RF-AUTH-* (Capa 2) |
 | AC-4 | Given file con extensión `.exe`, When POST, Then 400 `AUDIO_FORMAT_INVALID`. | RF-TRX-03 |
 | AC-5 | Given file > MAX_UPLOAD_MB, When POST, Then 413 `AUDIO_TOO_LARGE` ANTES de ffmpeg (chequeo de Content-Length). | RF-TRX-03 |
 | AC-6 | Given dos POST concurrentes (mismo o distinto user), When ambos arriban, Then el primero procesa, el segundo recibe 503 `GPU_BUSY` con `Retry-After: 600`. | RF-TRX-04 |
 | AC-7 | Given Whisper falla con CUDA OOM, When pipeline, Then 500 `GPU_ERROR` Y el lock se libera Y la DB queda sin row parcial Y el upload temporal se borra. | RF-TRX-05 |
 | AC-8 | Given user A sube file, user B con su propio bearer hace `GET /api/transcriptions/{id}` con id de A, Then 404 (no leak de existence). | ADR-014/015 + AC-18 Capa 2 |
-| AC-9 | Given lifespan termina de cargar modelos, When `/health`, Then `models.whisper = "ready"` y `models.pyannote = "ready"`. Antes de eso `/health` devuelve `loading` y `POST /api/transcriptions` retorna 503 `MODELS_NOT_LOADED`. | RF-TRX-06 (init) |
+| AC-9 | Given lifespan termina de cargar modelos, When `/health`, Then `models.whisper = "ready"` y `models.pyannote = "ready"`. Antes de eso `/health` devuelve `loading` y `POST /api/transcriptions` retorna 503 `MODELS_NOT_LOADED` con `reason` que indica qué modelo no está listo. | RF-TRX-06 (init) |
 | AC-10 | Given cleanup job corre, When entrada en cache > CACHE_TTL_SECONDS, Then se borra. | RF-CACHE-02 |
 | AC-11 | Given pipeline tarda > PIPELINE_TIMEOUT_SECONDS, When timeout, Then 504 `PIPELINE_TIMEOUT`, lock liberado, NO se persiste. | RF-TRX-* |
-| AC-12 | Given audio_hash conocido, When dos users distintos lo suben separadamente, Then el cache filesystem se reusa (1 sola corrida de pipeline) Y cada user tiene su propio row en `transcriptions` (privacy preservada porque el contenido del cache es el resultado, no asociado a user). | RF-TRX-02 + ADR-014 |
+| AC-12 | Given dos users distintos suben el MISMO archivo (mismo `audio_hash`), When ambos POSTean, Then **cada user procesa el pipeline independientemente** (no shared cache), cada uno obtiene su propio row en `transcriptions`, y los caches filesystem viven en directorios separados `(user_id, audio_hash)`. Zero leak entre users por design. | RF-TRX-02 + ADR-014 + D-027 |
 | AC-13 | Given `GET /api/transcriptions/{id}` con id existente del propio user, When request, Then 200 con el mismo shape que POST devolvió. | RF-MCP-06 (parcial, sin MCP wrapper) |
 | AC-14 | Given `compute_type = int8_float16` configurado, When pipeline corre, Then VRAM peak ≤ 7.5 GB (deja 0.5 GB de headroom para cuda overhead). | ADR-001 + ADR-005 |
-| AC-15 | Given pyannote sin HF_TOKEN, When startup, Then service fails con error claro `HF_TOKEN_MISSING_OR_INVALID`, no arranca uvicorn. | RF-TRX-06 |
+| AC-15 | Given pyannote no carga (HF_TOKEN missing/expired/access denied), When startup, Then **service arranca igual** (auth y `/health` siguen sirviendo); `/health.models.pyannote = "error"` con `detail` que cita el error específico (`hf_token_missing`, `hf_token_invalid`, `hf_terms_not_accepted`); `POST /api/transcriptions` devuelve 503 `MODELS_NOT_LOADED` con el mismo `detail` propagado. | RF-TRX-06 + D-028 |
 
 ---
 
@@ -219,8 +221,8 @@ Cleanup raw upload + normalized WAV (always, finally block)
 
 ## 5. Alternative flows
 
-### ALT-1: Cache hit
-Skip pipeline entirely. Insert new row in `transcriptions` for the user (cada user mantiene su histórico aunque el contenido se reuse). Return `cache_hit: true` en metadata.
+### ALT-1: Cache hit (per-user)
+Skip pipeline entirely. Insert new row in `transcriptions` for the user (el histórico crece, el cómputo no se repite). Return `cache_hit: true` en metadata. **El cache es per-user**: si user A subió el archivo, user B subiendo el mismo archivo vuelve a procesar (D-027).
 
 ### ALT-2: Audio extremo corto (<1 s) o silencio puro
 Whisper devuelve `segments: []`. Persistir igual con `text_content: ""`, `num_speakers: 0`. Marca en metadata `silent_audio: true`. NO es error.
