@@ -90,6 +90,14 @@ app = FastAPI(
 )
 
 
+# Capa 2 — wire the auth module's router. Routes are progressively populated
+# across batches B2-B5; B1 ships the smoke endpoint /auth/_ping so AC-1
+# (test_auth_module_imports) verifies the wire.
+from .auth import router as auth_router  # noqa: E402
+
+app.include_router(auth_router)
+
+
 # ---------------------------------------------------------------------------
 # ERR-2 — pool exhaustion → HTTP 503 with stable error_code.
 # ---------------------------------------------------------------------------
