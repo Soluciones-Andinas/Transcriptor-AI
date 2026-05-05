@@ -1,7 +1,7 @@
 """Hardware accelerator detection.
 
 Single source of truth for "what GPU/accelerator is available right now":
-- NVIDIA CUDA (production rig — RTX 5060 Ti 16 GB).
+- NVIDIA CUDA (production rig — RTX 4060 Ti 8 GB).
 - Apple Silicon MPS (developer Macs).
 - CPU fallback (CI runners, no-torch dev installs).
 
@@ -58,7 +58,7 @@ def detect_accelerator() -> AcceleratorInfo:
     except ImportError:
         return _CPU_INFO
 
-    # CUDA — production target. NVIDIA RTX 5060 Ti, 16 GB VRAM.
+    # CUDA — production target. NVIDIA RTX 4060 Ti, 8 GB VRAM.
     if torch.cuda.is_available():
         free_bytes, total_bytes = torch.cuda.mem_get_info(0)
         return AcceleratorInfo(

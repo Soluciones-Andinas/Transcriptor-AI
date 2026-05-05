@@ -4,7 +4,7 @@ This document governs how Claude Code operates inside this project. It is the Cl
 
 ## What this project is, in one paragraph
 
-`transcription-api` is a self-hosted batch API that receives audio or video files (MP4, MP3, WAV, M4A, FLAC) and returns Spanish transcriptions with speaker diarization as JSON, persisted in a 24-hour filesystem cache for idempotency. The stack is FastAPI plus WhisperX (Whisper large-v3) plus pyannote 3.1, deployed via Docker on a private rig with 16 GB VRAM in Soluciones Andinas' intranet. The full Spec-Driven Development wiki lives in `wiki/` with seven ADRs, two functional flows, nine functional requirements, and an end-to-end test matrix. The output is consumed manually via Cowork4Teams to generate meeting minutes; the API itself does not generate minutes.
+`transcription-api` is a self-hosted batch API that receives audio or video files (MP4, MP3, WAV, M4A, FLAC) and returns Spanish transcriptions with speaker diarization as JSON, persisted in a 24-hour filesystem cache for idempotency. The stack is FastAPI plus WhisperX (Whisper large-v3 quantized to `int8_float16`) plus pyannote 3.1, deployed via Docker on a private rig with NVIDIA RTX 4060 Ti 8 GB VRAM in Soluciones Andinas' intranet. The full Spec-Driven Development wiki lives in `wiki/` with seven ADRs, two functional flows, nine functional requirements, and an end-to-end test matrix. The output is consumed manually via the user's Claude (Code or Desktop) to generate meeting minutes; the API itself does not generate minutes.
 
 ---
 

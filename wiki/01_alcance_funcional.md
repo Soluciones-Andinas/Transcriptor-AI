@@ -8,7 +8,7 @@ Criterios de éxito medibles:
 
 - WER (Word Error Rate) ≤ 8 % en español rioplatense sobre audio limpio.
 - DER (Diarization Error Rate) ≤ 25 % para reuniones de 2 a 4 hablantes.
-- Latencia de procesamiento ≤ 12 minutos por hora de audio en GPU 16 GB VRAM.
+- Latencia de procesamiento ≤ 12 minutos por hora de audio en NVIDIA RTX 4060 Ti 8 GB VRAM (Whisper large-v3 cuantizado int8_float16 + pyannote 3.1).
 - Re-uploads del mismo archivo dentro de las 24 horas devuelven en menos de 5 segundos (cache hit).
 - Onboarding de un usuario nuevo (login + configurar MCP + primer transcript) en menos de 10 minutos.
 
@@ -198,7 +198,7 @@ Background task que purga el caché efímero vencido.
 
 | Tipo | Restricción | Impacto en alcance |
 |---|---|---|
-| Técnica | GPU única con 16 GB VRAM en el rig propio. | Limita concurrencia a 1 request por vez (ADR-005); large-v3 + pyannote ocupan ~12 GB. |
+| Técnica | GPU única NVIDIA RTX 4060 Ti con 8 GB VRAM en el rig propio. | Limita concurrencia a 1 request por vez (ADR-005); large-v3 cuantizado int8_float16 + pyannote ocupan ~7-8 GB; cuantización es obligatoria por VRAM (ADR-001). |
 | Técnica | Modelos open-source con licencia compatible con uso comercial. | Excluye Whisper Turbo de OpenAI; fija WhisperX (BSD-2), pyannote (MIT), modelos NeMo (CC-BY-4.0) como aceptables. |
 | Técnica | Idioma español rioplatense. | Excluye modelos optimizados solo para inglés (Sortformer); requiere validación empírica de WER en audio propio. |
 | Técnica | Cliente principal es Claude Code o Claude Desktop. | El proyecto no testea con otros clientes MCP. |
@@ -242,7 +242,7 @@ Background task que purga el caché efímero vencido.
   - `postgres`: PostgreSQL 16 con volumen persistente.
 - **Escalabilidad**: vertical sobre la GPU única; sin escalado horizontal en MVP.
 - **Requisitos mínimos del rig**:
-  - GPU NVIDIA con 16 GB VRAM, drivers ≥ 535, CUDA 12.1+.
+  - GPU NVIDIA con ≥ 8 GB VRAM (rig actual: RTX 4060 Ti 8 GB; con menos VRAM no entra Whisper large-v3 int8_float16 + pyannote), drivers ≥ 535, CUDA 12.1+.
   - 32 GB RAM recomendado.
   - 100 GB de disco libre (modelos ~10 GB + cache + Postgres + uploads + blobs + sistema).
   - Conectividad intranet en puerto 8000.

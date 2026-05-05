@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     hf_token: SecretStr = Field(default=SecretStr(""), alias="HF_TOKEN")
     data_dir: Path = Field(default=Path("/data"), alias="DATA_DIR")
     default_language: str = Field(default="es", alias="DEFAULT_LANGUAGE")
-    compute_type: str = Field(default="float16", alias="COMPUTE_TYPE")
+    compute_type: str = Field(default="int8_float16", alias="COMPUTE_TYPE")
     max_upload_mb: int = Field(default=500, alias="MAX_UPLOAD_MB", gt=0)
     max_image_upload_mb: int = Field(default=25, alias="MAX_IMAGE_UPLOAD_MB", gt=0)
     pipeline_timeout_seconds: int = Field(

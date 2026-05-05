@@ -1,6 +1,6 @@
 # transcription-api
 
-Servicio multi-tenant self-hosted para transcripción + diarización de reuniones en español, integrado con el Claude personal de cada usuario vía MCP. Ejecutable en GPU local de 16 GB VRAM.
+Servicio multi-tenant self-hosted para transcripción + diarización de reuniones en español, integrado con el Claude personal de cada usuario vía MCP. Ejecutable en GPU local NVIDIA con ≥ 8 GB VRAM (rig actual: RTX 4060 Ti 8 GB).
 
 **Estado**: Wiki SDD completa (alcance + arquitectura + 13 ADRs + 6 flujos + 26 RFs + matriz de pruebas). Infra Docker básica lista. Implementación funcional pendiente.
 
@@ -21,7 +21,7 @@ INTRANET (rig Sandinas)                          USER MACHINE
 │   └── Postgres (users, history,      │
 │                tokens, images)       │         CLOUD
 │                                      │         ┌──────────────────┐
-│ GPU 16 GB VRAM, Docker, intranet     │◄─OIDC──►│ Microsoft Entra  │
+│ GPU 8 GB VRAM, Docker, intranet      │◄─OIDC──►│ Microsoft Entra  │
 └──────────────────────────────────────┘         │ (tenant Sandinas)│
                                                  └──────────────────┘
 ```
@@ -31,7 +31,7 @@ INTRANET (rig Sandinas)                          USER MACHINE
 | Componente | Tecnología | Justificación |
 |---|---|---|
 | HTTP / MCP | FastAPI + Uvicorn + `mcp` SDK | MCP-first ([ADR-011](wiki/ADR/ADR-011.md)); REST mínimo solo para blobs |
-| STT | Whisper large-v3 (vía WhisperX) | [ADR-001](wiki/ADR/ADR-001.md): español ~3-6 % WER; framework integrado |
+| STT | Whisper large-v3 + cuantización `int8_float16` (vía WhisperX) | [ADR-001](wiki/ADR/ADR-001.md): español ~3-6 % WER; framework integrado; cuantización por VRAM 8 GB |
 | Diarización | pyannote 3.1 | [ADR-002](wiki/ADR/ADR-002.md): multilingüe |
 | Audio | ffmpeg | Universal |
 | Persistencia | PostgreSQL 16 + filesystem | [ADR-008](wiki/ADR/ADR-008.md): Postgres para datos con identidad; filesystem para caché efímero |
@@ -77,9 +77,9 @@ curl http://localhost:8000/health
 #   "status": "ok",
 #   "version": "0.1.0",
 #   "gpu_available": true,
-#   "gpu_name": "NVIDIA GeForce RTX 4080",
-#   "vram_total_mb": 16376,
-#   "vram_free_mb": 15800,
+#   "gpu_name": "NVIDIA GeForce RTX 4060 Ti",
+#   "vram_total_mb": 8188,
+#   "vram_free_mb": 8068,
 #   "cuda_version": "12.1",
 #   "data_dir_writable": true,
 #   "cache_entries": 0
@@ -99,7 +99,7 @@ curl -F file=@reunion.mp4 \
 
 ## Prerequisitos del rig
 
-- GPU NVIDIA con 16 GB VRAM, drivers ≥ 535, CUDA 12.1+
+- GPU NVIDIA con ≥ 8 GB VRAM, drivers ≥ 535, CUDA 12.1+ (rig actual: RTX 4060 Ti 8 GB; con menos no entra Whisper large-v3 int8_float16 + pyannote 3.1)
 - Docker Engine 24+ con `docker compose` plugin v2.20+
 - `nvidia-container-toolkit` instalado y configurado (`nvidia-smi` debe funcionar dentro de un container)
 - 50 GB libres de disco (10 GB modelos + 10 MB caché 24h + sistema)

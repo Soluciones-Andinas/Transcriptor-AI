@@ -8,7 +8,7 @@ Este orden gobierna todos los tradeoffs y es la referencia para `AGENTS.md` / `C
 
 ## 1. Resumen Ejecutivo
 
-API multi-tenant con frontend mínimo y servidor MCP que recibe archivos de audio/video de los usuarios autenticados, devuelve transcripción diarizada en español, y expone esos datos vía MCP para que el Claude personal de cada usuario pueda generar minutas. Stack: FastAPI + WhisperX (Whisper large-v3 + pyannote 3.1) + ffmpeg + PostgreSQL + React/Vite, sobre Docker con GPU pass-through en un rig privado de 16 GB VRAM en intranet de Sandinas. Autenticación con Microsoft Entra ID OAuth 2.0. La generación de minutas ocurre en el Claude del usuario (no en el backend); el backend mantiene la transcripción y las imágenes asociadas, expuestas vía tools y resources MCP. Decisiones críticas: pipeline síncrono ([ADR-003](ADR/ADR-003.md)), caché efímero por audio_hash en filesystem ([ADR-004](ADR/ADR-004.md)), datos persistentes en Postgres ([ADR-008](ADR/ADR-008.md)), Microsoft Entra ID SSO ([ADR-009](ADR/ADR-009.md)), UI React mínima ([ADR-010](ADR/ADR-010.md)), MCP-first con REST mínimo ([ADR-011](ADR/ADR-011.md)), minutas en Claude del user ([ADR-012](ADR/ADR-012.md)), uploads HTTP con bearer ([ADR-013](ADR/ADR-013.md)).
+API multi-tenant con frontend mínimo y servidor MCP que recibe archivos de audio/video de los usuarios autenticados, devuelve transcripción diarizada en español, y expone esos datos vía MCP para que el Claude personal de cada usuario pueda generar minutas. Stack: FastAPI + WhisperX (Whisper large-v3 cuantizado int8_float16 + pyannote 3.1) + ffmpeg + PostgreSQL + React/Vite, sobre Docker con GPU pass-through en un rig privado con NVIDIA RTX 4060 Ti 8 GB VRAM en intranet de Sandinas. Autenticación con Microsoft Entra ID OAuth 2.0. La generación de minutas ocurre en el Claude del usuario (no en el backend); el backend mantiene la transcripción y las imágenes asociadas, expuestas vía tools y resources MCP. Decisiones críticas: pipeline síncrono ([ADR-003](ADR/ADR-003.md)), caché efímero por audio_hash en filesystem ([ADR-004](ADR/ADR-004.md)), datos persistentes en Postgres ([ADR-008](ADR/ADR-008.md)), Microsoft Entra ID SSO ([ADR-009](ADR/ADR-009.md)), UI React mínima ([ADR-010](ADR/ADR-010.md)), MCP-first con REST mínimo ([ADR-011](ADR/ADR-011.md)), minutas en Claude del user ([ADR-012](ADR/ADR-012.md)), uploads HTTP con bearer ([ADR-013](ADR/ADR-013.md)).
 
 ## 2. Vista de Contexto (C4 Nivel 1)
 
@@ -45,11 +45,11 @@ C4Container
     Person(usuario, "Usuario Sandinas")
     Person_Ext(claude_user, "Claude del Usuario", "Cliente MCP")
 
-    System_Boundary(b, "transcription-api (rig 16GB VRAM)") {
+    System_Boundary(b, "transcription-api (rig 8GB VRAM)") {
         Container(ui, "UI React + Vite", "TypeScript + Tailwind", "Login, mcp-setup, history")
         Container(api, "FastAPI App", "Python 3.10 + Uvicorn", "REST + MCP server + StaticFiles")
         Container(audio, "Normalizador de Audio", "ffmpeg", "MP4/MP3 -> WAV mono 16kHz; SHA-256")
-        Container(stt, "Motor de Transcripción", "WhisperX + Whisper large-v3", "Texto + timestamps por palabra")
+        Container(stt, "Motor de Transcripción", "WhisperX + Whisper large-v3 (int8_float16)", "Texto + timestamps por palabra")
         Container(diar, "Motor de Diarización", "pyannote 3.1", "Segmentos por hablante")
         Container(merge, "Ensamblador", "Lógica Python", "Asocia palabras a hablantes")
         Container(mcp, "MCP Server", "Python mcp SDK + auth middleware", "Tools + Resources OAuth-protected")
@@ -148,7 +148,7 @@ sequenceDiagram
 |---|---|---|---|---|
 | API HTTP | FastAPI 0.115 + Uvicorn 0.32 | Estándar Python; async; OpenAPI; compatible con MCP SDK (Simplicidad) | Versión Python con CUDA wheels específica | Pinear 3.10/3.11 en Dockerfile |
 | MCP Server | `mcp` SDK Anthropic + auth middleware custom | Único SDK oficial; transport streamable HTTP integrado | SDK joven, breaking changes posibles | Pinear versión; tests de contrato |
-| STT | WhisperX 3.8.5 + Whisper large-v3 | Framework con diarización integrada (Simplicidad); calidad probada en español ([ADR-001](ADR/ADR-001.md)) | Mejora marginal vs Canary | Validación empírica Fase 4 |
+| STT | WhisperX 3.8.5 + Whisper large-v3 (int8_float16) | Framework con diarización integrada (Simplicidad); calidad probada en español; cuantización requerida por VRAM 8 GB del rig ([ADR-001](ADR/ADR-001.md)) | Mejora marginal vs Canary; ~+0,5pp WER por cuantización | Validación empírica Capa 4 |
 | Diarización | pyannote 3.1 | Multilingüe maduro; integra WhisperX ([ADR-002](ADR/ADR-002.md)) | Requiere HF token | Aceptar términos en Fase 0 |
 | Audio | ffmpeg 6.x | Universal, todos los codecs (Simplicidad) | Codec raro falla | `-err_detect ignore_err` + tests con MP4 reales |
 | Caché efímero (24h) | Filesystem local | Sin dependencias; debug trivial ([ADR-004](ADR/ADR-004.md)) | TTL manual | Cleanup job |
@@ -208,7 +208,7 @@ sequenceDiagram
 C4Deployment
     title Vista de Despliegue - Rig Intranet Sandinas
 
-    Deployment_Node(rig, "Rig Sandinas", "Linux + GPU 16GB VRAM") {
+    Deployment_Node(rig, "Rig Sandinas", "Linux + NVIDIA RTX 4060 Ti 8GB VRAM") {
         Deployment_Node(docker, "Docker Engine + nvidia-container-toolkit", "Docker 24+") {
             Container(api, "transcription-api", "1 instancia, GPU pass-through")
             ContainerDb(pg, "postgres:16", "1 instancia, persistent volume")

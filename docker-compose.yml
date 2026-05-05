@@ -44,7 +44,7 @@ services:
       # Defaults sobreescribibles desde .env
       DATA_DIR: ${DATA_DIR:-/data}
       DEFAULT_LANGUAGE: ${DEFAULT_LANGUAGE:-es}
-      COMPUTE_TYPE: ${COMPUTE_TYPE:-float16}
+      COMPUTE_TYPE: ${COMPUTE_TYPE:-int8_float16}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
       MAX_IMAGE_UPLOAD_MB: ${MAX_IMAGE_UPLOAD_MB:-25}
       PIPELINE_TIMEOUT_SECONDS: ${PIPELINE_TIMEOUT_SECONDS:-1800}

@@ -35,7 +35,7 @@ def test_detect_returns_cuda_info_when_cuda_available():
     fake_torch.cuda = type(sys)("torch_cuda_stub")
     fake_torch.cuda.is_available = lambda: True
     fake_torch.cuda.mem_get_info = lambda idx: (8 * 1024 * 1024 * 1024, 16 * 1024 * 1024 * 1024)
-    fake_torch.cuda.get_device_name = lambda idx: "NVIDIA GeForce RTX 5060 Ti"
+    fake_torch.cuda.get_device_name = lambda idx: "NVIDIA GeForce RTX 4060 Ti"
     fake_torch.version = type(sys)("torch_version_stub")
     fake_torch.version.cuda = "12.1"
     fake_torch.backends = type(sys)("torch_backends_stub")
@@ -47,7 +47,7 @@ def test_detect_returns_cuda_info_when_cuda_available():
         info = detect_accelerator()
     assert info.backend == "cuda"
     assert info.available is True
-    assert info.device_name == "NVIDIA GeForce RTX 5060 Ti"
+    assert info.device_name == "NVIDIA GeForce RTX 4060 Ti"
     assert info.vram_total_mb == 16 * 1024
     assert info.vram_free_mb == 8 * 1024
     assert info.cuda_version == "12.1"
