@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_session
 from ..db.models import McpBearer, OAuthToken, User
 from .crypto import encrypt_token
-from .flash import set_bearer_flash
+from .dependencies import get_current_user_web
+from .flash import pop_bearer_flash, set_bearer_flash
 from .mcp_bearer import generate_bearer
 from .oauth_client import (
     OAuthCodeInvalid,
@@ -233,4 +234,162 @@ async def callback(
     if is_first_login and bearer_plaintext is not None:
         set_bearer_flash(response, bearer_plaintext)
 
+    return response
+
+
+# --------------------------------------------------------------------------
+# B5 — User-facing endpoints after login.
+# --------------------------------------------------------------------------
+@router.get("/me")
+async def me(
+    request: Request,
+    user: User = Depends(get_current_user_web),
+    db: AsyncSession = Depends(get_session),
+):
+    """Return the authenticated user's profile + active MCP bearer.
+
+    RF-AUTH-06: includes the bearer plaintext if the `mcp_bearer_flash` cookie
+    is present (one-shot pass from /auth/callback). Otherwise plaintext is
+    None — only the bearer.id is returned (the user already saved the
+    plaintext, or has lost it and must regenerate).
+    """
+    from fastapi.responses import JSONResponse
+
+    bearer = (
+        await db.execute(
+            select(McpBearer)
+            .where(McpBearer.user_id == user.id)
+            .where(McpBearer.revoked_at.is_(None))
+            .order_by(McpBearer.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    response = JSONResponse(content={
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "display_name": user.display_name,
+        },
+        "bearer": (
+            {
+                "id": str(bearer.id),
+                "plaintext": None,  # filled below if flash cookie present
+                "created_at": bearer.created_at.isoformat() if bearer.created_at else None,
+                "name": bearer.name,
+            }
+            if bearer is not None
+            else None
+        ),
+        "mcp_url": "http://localhost:8000/mcp",  # served by Capa 6
+    })
+
+    plaintext = pop_bearer_flash(request, response)
+    if plaintext and bearer is not None:
+        # Re-render the body with the plaintext included. JSONResponse renders
+        # at construction so we can't mutate `content`; build a fresh response
+        # and copy the cookie deletion that pop_bearer_flash queued.
+        body = {
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "display_name": user.display_name,
+            },
+            "bearer": {
+                "id": str(bearer.id),
+                "plaintext": plaintext,
+                "created_at": bearer.created_at.isoformat() if bearer.created_at else None,
+                "name": bearer.name,
+            },
+            "mcp_url": "http://localhost:8000/mcp",
+        }
+        new_response = JSONResponse(content=body)
+        # Carry over the Set-Cookie headers from the original response (the
+        # delete-cookie queued by pop_bearer_flash).
+        for hdr_name, hdr_value in response.raw_headers:
+            if hdr_name.lower() == b"set-cookie":
+                new_response.raw_headers.append((hdr_name, hdr_value))
+        return new_response
+
+    return response
+
+
+@router.post("/regenerate-mcp-token")
+async def regenerate_mcp_token(
+    user: User = Depends(get_current_user_web),
+    db: AsyncSession = Depends(get_session),
+):
+    """Revoke the user's active MCP bearer and emit a new one.
+
+    RF-AUTH-07: emits a new bearer plaintext (shown ONCE in this response).
+    ERR-4: the partial UNIQUE constraint `uq_mcp_bearers_active_per_user`
+    prevents two concurrent regenerates from both succeeding. On
+    IntegrityError we retry once (re-revoke + re-insert) — last-writer-wins
+    semantics; the user only ever races against themselves anyway.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import update as sql_update
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.sql import func
+
+    last_error: Exception | None = None
+    for _attempt in range(2):
+        try:
+            await db.execute(
+                sql_update(McpBearer)
+                .where(McpBearer.user_id == user.id)
+                .where(McpBearer.revoked_at.is_(None))
+                .values(revoked_at=func.clock_timestamp())
+            )
+            plaintext, token_hash = generate_bearer()
+            new_bearer = McpBearer(
+                id=uuid.uuid4(),
+                user_id=user.id,
+                token_hash=token_hash,
+                name="regenerated",
+            )
+            db.add(new_bearer)
+            await db.commit()
+            await db.refresh(new_bearer)
+            return {
+                "bearer": {
+                    "id": str(new_bearer.id),
+                    "plaintext": plaintext,
+                    "created_at": new_bearer.created_at.isoformat()
+                    if new_bearer.created_at
+                    else datetime.now(tz=timezone.utc).isoformat(),
+                    "name": new_bearer.name,
+                }
+            }
+        except IntegrityError as exc:
+            last_error = exc
+            await db.rollback()
+            logger.warning(
+                "mcp_bearer_regenerate_race user_id=%s attempt=%d", user.id, _attempt,
+            )
+            continue
+
+    logger.error(
+        "mcp_bearer_regenerate_failed_after_retry user_id=%s error=%s",
+        user.id, last_error,
+    )
+    from fastapi import HTTPException
+    raise HTTPException(
+        status_code=500,
+        detail={"error_code": "INTERNAL_ERROR", "reason": "regenerate failed after retry"},
+    )
+
+
+@router.post("/logout")
+async def logout(request: Request) -> RedirectResponse:
+    """Clear the web session cookie. ALT-1: does NOT revoke the MCP bearer.
+
+    The user might be using the bearer from Claude Desktop (no browser);
+    revoking on logout would be a destructive surprise. To revoke explicitly,
+    the user calls POST /auth/regenerate-mcp-token (RF-AUTH-07).
+    """
+    response = RedirectResponse(url="/login", status_code=302)
+    response.delete_cookie(key="session", samesite="strict")
+    logger.info("auth_logout")
     return response
