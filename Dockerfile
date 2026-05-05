@@ -28,17 +28,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Instalar dependencias Python primero para aprovechar layer cache
-COPY pyproject.toml ./
-RUN pip install --upgrade pip setuptools wheel \
-    && pip install -e .
-
-# Copiar código y configuración de Alembic
+# Instalación non-editable: el container es immutable post-build (no editamos
+# /app/src/* en runtime), así que `pip install .` produce una imagen más
+# liviana que `pip install -e .` y evita el bug donde setuptools necesita
+# leer src/ en tiempo de install para registrar paquetes.
+#
+# Trade-off de layer cache: copiamos src/ junto con pyproject.toml, así un
+# cambio de código invalida la layer de install. Para este proyecto con
+# deps estables y src/ chico, es aceptable. Si deps crecen, mover a un
+# patrón requirements.txt-first.
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install . \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
 # Crear DATA_DIR (el volumen lo monta encima en runtime, pero esto cubre el caso sin volumen)
 RUN mkdir -p /data/models /data/cache
