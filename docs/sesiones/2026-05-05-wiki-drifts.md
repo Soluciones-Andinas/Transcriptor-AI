@@ -590,17 +590,50 @@ uno.
 
 ---
 
+### D-034 🟢 Capa 3 Batch 3: `stt.transcribe` retorna dict canónico, no `list[Segment]`
+
+**Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-plan.md` Task 3.1 RED)**:
+> con modelo mockeado que retorna shape canónico de WhisperX
+> (`{"segments": [...], "language": "es"}`), `transcribe()` retorna
+> `list[Segment]` con `start/end/text/words`.
+
+**Reality (este commit, `f31253e`)**: el wrapper retorna el dict
+upstream tal cual (`{"segments": [...], "language": "..."}`). Tirar
+`language` aquí significaría que el orchestrator (Batch 5) tendría que
+hacer una segunda pasada por el audio para detectar idioma — el field
+es parte de la response (`metadata.language`, spec §1.1) y de la fila
+en `transcriptions` (Capa 1, columna `language`).
+
+**Resolución**: mantener el dict shape upstream. Tests de Batch 3
+(`test_stt_transcribe.py`) verifican `out["segments"]` y `out["language"]`,
+no una bare list. El test del plan T3.1 RED dice "list[Segment] con
+start/end/text/words" — interpretado como "los segments ya tienen ese
+shape", no como "transcribe() retorna list".
+
+**Acción pendiente**: ninguna. La frase del plan es ambigua; el código
+y los tests hacen el contrato concreto. Si el orchestrator Batch 5
+quiere acceso bare a la lista, lo hace con `result["segments"]`.
+
+**Lección**: cuando un plan describe shapes de I/O, preferir mostrar el
+ejemplo completo del retorno antes que abreviar a "list[T]". La
+ambigüedad entre "retorna lista" y "tiene una lista adentro" cuesta una
+decisión de diseño que el código termina forzando, y la decisión
+puede ser irreversible (cambiar shape en Batch 5+ obliga a tocar
+orchestrator + API + tests).
+
+---
+
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 27 (10 de Capa 2 review + 2 de Capa 3 Batch 1 + 3 operacionales del primer rig deployment).
+**Total drifts identificados**: 28 (10 de Capa 2 review + 2 de Capa 3 Batch 1 + 3 operacionales del primer rig deployment + 1 de Capa 3 Batch 3).
 
-**Severidad** (post-actualización 2026-05-05 sesión wiki + drifts deployment):
+**Severidad** (post-actualización 2026-05-05 sesión wiki + drifts deployment + Batch 3):
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
 - 🟠 HIGH: 6 (D-002, D-004, D-006, D-007, D-009, D-031, D-032)
 - 🟡 MEDIUM: 13 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033)
-- 🟢 LOW: 5 (D-012, D-013, D-019, D-020, D-022)
+- 🟢 LOW: 6 (D-012, D-013, D-019, D-020, D-022, D-034)
 
-**Drifts ya cerrados**: 22/27.
+**Drifts ya cerrados**: 23/28.
 - **Cerrados en wiki esta sesión** (commits `60795ab..00d25ad` en branch `feat/capa3-pipeline`): D-014 (ADR-015 supersedes ADR-014), D-016 (RF-AUTH-01 multi-tab), D-017 (RF-AUTH-08 banner UI), D-018 (RF-MCP-00 contract anchor).
 - **D-013**: confirmado como falso drift (wiki ya correcta) — entrada actualizada arriba.
 - **D-031, D-032**: cerrados en código (commits `6dcacc4` logging fix + `d034b51` httpx promotion).

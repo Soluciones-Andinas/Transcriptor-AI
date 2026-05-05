@@ -25,7 +25,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Canonical WhisperX response shape — used across the file.
 # ---------------------------------------------------------------------------
