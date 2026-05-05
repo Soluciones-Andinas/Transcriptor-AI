@@ -5,7 +5,7 @@ Reference docs: wiki/05_modelo_datos.md, wiki/ADR/ADR-008.md, wiki/ADR/ADR-009.m
 """
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,6 +56,58 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = Field(
         default=86400, alias="SESSION_TTL_SECONDS", gt=0
     )
+
+    # Public base URL (for /auth/me's `mcp_url` field). In Docker compose
+    # this is the rig's address; locally it's http://localhost:8000.
+    public_base_url: str = Field(
+        default="http://localhost:8000", alias="PUBLIC_BASE_URL"
+    )
+
+    @field_validator("jwt_secret", mode="after")
+    @classmethod
+    def _validate_jwt_secret(cls, v: SecretStr) -> SecretStr:
+        """Refuse to boot with a JWT_SECRET shorter than 32 chars.
+
+        HS256 with a short secret enables offline brute-force forgery if any
+        signed token leaks. Same secret is also used as the salt for the
+        oauth_state cookie via itsdangerous, so the same constraint applies.
+        """
+        raw = v.get_secret_value()
+        if len(raw) < 32:
+            raise ValueError(
+                f"JWT_SECRET must be at least 32 characters (got {len(raw)}). "
+                "Generate with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+        return v
+
+    @field_validator("oauth_token_enc_key", mode="after")
+    @classmethod
+    def _validate_oauth_token_enc_key(cls, v: SecretStr) -> SecretStr:
+        """Validate OAUTH_TOKEN_ENC_KEY decodes to exactly 32 bytes (AES-256-GCM).
+
+        The crypto module also validates at module-import time, but doing it
+        here means a misconfigured deployment fails at the config-load
+        boundary with a clear Pydantic error rather than a deep traceback
+        later. Empty default is allowed (auth module unused in Capa 1).
+        """
+        import base64
+
+        raw = v.get_secret_value()
+        if not raw:
+            return v  # empty allowed for non-auth deployments
+        try:
+            decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        except Exception as exc:
+            raise ValueError(
+                f"OAUTH_TOKEN_ENC_KEY is not valid urlsafe-base64: {exc}"
+            ) from exc
+        if len(decoded) != 32:
+            raise ValueError(
+                f"OAUTH_TOKEN_ENC_KEY must decode to 32 bytes, got {len(decoded)}. "
+                "Generate with: python -c 'import secrets, base64; "
+                "print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'"
+            )
+        return v
 
     # --- Caché filesystem y cleanup ----------------------------------------
     cache_ttl_seconds: int = Field(default=86400, alias="CACHE_TTL_SECONDS", gt=0)
