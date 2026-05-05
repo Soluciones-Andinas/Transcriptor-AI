@@ -38,6 +38,7 @@ dependencies = [
     "authlib>=1.3.0",  # OAuth 2.0 client + JWT + JWKS verification
     "cryptography>=42.0",  # AES-256-GCM for oauth_tokens.ms_*_encrypted (RF-AUTH-02)
     "itsdangerous>=2.2.0",  # signed cookie state for OAuth PKCE flow (RF-AUTH-01)
+    "httpx>=0.27.0",  # OAuth /token + JWKS fetch (oauth_client.exchange_code, fetch_jwks)
 ]
 
 [project.optional-dependencies]
