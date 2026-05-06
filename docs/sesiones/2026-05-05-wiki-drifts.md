@@ -841,30 +841,46 @@ orchestrator + API + tests).
 
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 31 (10 de Capa 2 review + 2 de Capa 3 Batch 1 + 3 operacionales del primer rig deployment + 1 de Capa 3 Batch 3 + 1 de Capa 3 Batch 4 + 2 de Capa 3 Batch 5).
+**Total drifts identificados**: 35 (10 Capa 2 review + 2 Capa 3 Batch 1 + 3 operacionales rig + 1 Batch 3 + 1 Batch 4 + 2 Batch 5 + 4 Capa 3 review post-fix SD-3..6).
 
-**Severidad** (post-actualización 2026-05-05 sesión wiki + drifts deployment + Batches 3-5):
+**Severidad** (post-actualización 2026-05-05 incluyendo Capa 3 review fixes):
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
 - 🟠 HIGH: 6 (D-002, D-004, D-006, D-007, D-009, D-031, D-032)
 - 🟡 MEDIUM: 13 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033)
-- 🟢 LOW: 9 (D-012, D-013, D-019, D-020, D-022, D-034, D-035, D-036, D-037)
+- 🟢 LOW: 13 (D-012, D-013, D-019, D-020, D-022, D-034, D-035, D-036, D-037, D-038, D-039, D-040, D-041)
 
-**Drifts ya cerrados**: 26/31.
-- **Cerrados en wiki esta sesión** (commits `60795ab..00d25ad` en branch `feat/capa3-pipeline`): D-014 (ADR-015 supersedes ADR-014), D-016 (RF-AUTH-01 multi-tab), D-017 (RF-AUTH-08 banner UI), D-018 (RF-MCP-00 contract anchor).
-- **D-013**: confirmado como falso drift (wiki ya correcta) — entrada actualizada arriba.
-- **D-031, D-032**: cerrados en código (commits `6dcacc4` logging fix + `d034b51` httpx promotion).
+**Drifts ya cerrados**: 30/35.
+
+- **Cerrados en wiki sesión 2026-05-05** (commits `60795ab..00d25ad` en branch `feat/capa3-pipeline`): D-014, D-016, D-017, D-018.
+- **D-013**: confirmado como falso drift (wiki ya correcta) — entrada actualizada.
+- **D-031, D-032**: cerrados en código (commits `6dcacc4` + `d034b51`) durante deployment al rig.
+- **D-038**: cerrado en código (commit `73822e8`) — `_sha256_wav_pcm` parsea RIFF para hash PCM-only.
+- **D-039, D-040, D-041**: comportamiento implementado matches la decisión Franco; entrada documenta + cierra.
+
+**Capa 3 review fixes aplicados** (5 CRITICAL + 9 HIGH + 6 SPEC DRIFTS, 7 commits):
+
+| Group | Items | Commit | Files |
+|---|---|---|---|
+| G1 | CR-1 + CR-2 | `81be5ea` | orchestrator.py + new test_orchestration_lock.py |
+| G2 | CR-3 + CR-4 + H-4 | `8d9ca7a` | normalize.py + main.py + test_main_lifespan_helpers.py |
+| G3 | CR-5 + H-6 + H-7 + H-8 + H-9 | `8c50339` | tests/integration/api/test_transcriptions.py (+7 tests) |
+| G4 | H-1 + H-2 + H-3 + H-5 | `8c8f122` | normalize.py + stt.py + main.py + api/transcriptions.py |
+| G5 | SD-1 + SD-2 | `9ca40ce` | config.py + normalize.py + orchestrator.py + api |
+| G6 | SD-3 + drift entries SD-4..6 | `73822e8` | normalize.py + this drift log + tests |
+| G7 | Drift sync + final push | (this commit) | this drift log |
 
 **Drifts pendientes de cierre (acciones concretas)**:
 
 | ID | Acción | Tipo | Cuándo |
 |----|--------|------|--------|
-| D-010 | `/graphify --update` post-Capa 2 + Capa 3 fixes | proceso | tras cerrar Capa 3 Batch 1 |
+| D-010 | `/graphify --update` post-Capa 2 + Capa 3 fixes | proceso | tras merge de feat/capa3-pipeline a master |
 | D-019 | Encryption key rotation versioning (key-id prefix) | code | post-Capa 6 o auditoría externa |
 | D-020 | `mcp_bearers.last_used_at` throttle 5 min | code | cuando Capa 6 muestre carga real |
 | D-021 | Test sub-app fixture refactor (sacar `/_test_mcp_*` del prod app) | tests | pre-Capa 6 |
 | D-022 | Callback service extraction (`auth/callback_service.py`) | refactor | cuando el handler vuelva a crecer |
 | D-033 | Documentar Postgres password rotation en deployment runbook | docs | Capa 7 (deployment runbook) |
 | D-026, D-027, D-028 | Wiki edits Capa 3 (REST entry, per-user cache, lazy pyannote) | wiki | post-merge Capa 3 a master |
+| D-040 | Documentar `min_speakers` semántica hint vs requirement en RF-TRX | wiki | post-merge Capa 3 a master |
 
 **Pattern emergente para futuras capas**:
 1. Antes de cerrar specs/ADRs, validar las asunciones físicas (hardware, lib semantics, dialect-specific types) con un experimento mínimo.

@@ -124,16 +124,24 @@ async def test_health_reports_pyannote_error_when_load_fails(stub_db_ping):
 async def test_health_reports_whisper_error_when_load_fails(stub_db_ping):
     """
     Spec: SPEC-capa3-pipeline-v1
-    Criterion: AC-9 — Given Whisper raises (e.g. CUDA driver missing) during
-    startup, When the service finishes booting, Then /health.status is "ok"
-    and /health.models.whisper = "error" with a non-empty whisper_detail
-    that surfaces the runtime category (here: a CUDA error).
+    Criterion: AC-9 + H-5 — Given the inner whisperx loader raises a
+    runtime error that the wrapper can classify (e.g. CUDA driver
+    missing), When the service finishes booting, Then /health.status
+    is "ok" and /health.models.whisper = "error" with whisper_detail
+    set to a stable discriminator (here: ``cuda_unavailable``).
+
+    Capa 3 review H-5: the previous variant patched
+    ``load_whisper_model`` directly with a raw RuntimeError, which
+    bypassed the classifier wrapper. The classifier IS the load-bearing
+    feature for typed details, so we must exercise it end-to-end —
+    patch the inner indirection ``_whisperx_load_model`` so the
+    classifier runs.
     """
     from transcription_api.main import app
 
     with patch(
-        "transcription_api.pipeline.stt.load_whisper_model",
-        side_effect=RuntimeError("CUDA driver not available"),
+        "transcription_api.pipeline.stt._whisperx_load_model",
+        side_effect=RuntimeError("CUDA driver not available; cuda is not available"),
     ), patch(
         "transcription_api.pipeline.diarize.load_pyannote_pipeline",
         return_value=MagicMock(),
@@ -148,7 +156,7 @@ async def test_health_reports_whisper_error_when_load_fails(stub_db_ping):
     body = r.json()
     assert body["status"] == "ok"
     assert body["models"]["whisper"] == "error"
-    detail = body["models"].get("whisper_detail") or ""
-    assert "cuda" in detail.lower()
+    # H-5: detail is a closed enum value, not raw exception text.
+    assert body["models"]["whisper_detail"] == "cuda_unavailable"
     # Other model unaffected.
     assert body["models"]["pyannote"] == "ready"
