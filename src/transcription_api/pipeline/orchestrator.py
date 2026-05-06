@@ -2,10 +2,10 @@
 
 Spec: SPEC-capa3-pipeline-v1
 Covers:
-- AC-6 — Module-level ``_orchestrator_lock = asyncio.Lock()`` (one per
-  process, ADR-005: one GPU job at a time). Concurrent ``orchestrate``
-  calls serialize: the first holds the lock, the second waits up to
-  ``lock_wait_seconds`` and raises ``GPUBusy(retry_after=...)``.
+- AC-6 — Module-level ``_orchestrator_lock`` (one per process, ADR-005:
+  one GPU job at a time). Concurrent ``orchestrate`` calls serialize:
+  the first holds the lock, the second waits up to ``lock_wait_seconds``
+  and raises ``GPUBusy(retry_after=...)``.
 - AC-7 — A ``try/finally`` around the inner pipeline body releases the
   lock no matter what fails inside (typed pipeline errors, generic
   RuntimeError, asyncio cancellation). Tests assert the lock is
@@ -16,9 +16,22 @@ Covers:
   the configured deadline. Distinct exception type from ``GPUBusy``
   so Batch 6 can map them to different HTTP responses (503 with
   Retry-After vs 504).
-- AC-1 (orchestrator side, T5.4 — pending) — End-to-end
-  normalize → cache lookup → STT → diarize → merge → persist with
-  per-user cache and DB INSERT inside ``bypass_scoping(db)``.
+- AC-1 (orchestrator side) — End-to-end normalize → cache lookup → STT
+  → diarize → merge → persist with per-user cache and DB INSERT inside
+  ``bypass_scoping(db)``.
+
+Capa 3 review fixes (CR-1 + CR-2):
+
+- ``_OrchestrationLock`` (custom class below) wraps ``asyncio.Lock``
+  with owner-task tracking. Closes the BPO-31647 race window where
+  ``asyncio.wait_for(lock.acquire(), timeout=...)`` can return
+  ``TimeoutError`` while the underlying lock IS acquired. The
+  owner-task field lets the caller's TimeoutError handler check
+  ``held_by_current_task()`` and release safely.
+- Explicit ``acquired`` flag in ``orchestrate()`` replaces the prior
+  ``if _orchestrator_lock.locked(): release()`` defensive guard which
+  was unsound (``locked()`` is global state — could be True because
+  another task holds it; releasing would unlock theirs incorrectly).
 
 The unit of work is ``_run_pipeline`` — the documented patchable seam
 that lets tests exercise the lock+timeout wrapper without touching
@@ -44,10 +57,66 @@ from .merge import assign_speakers_to_words
 logger = logging.getLogger("transcription_api.pipeline")
 
 
+class _OrchestrationLock:
+    """asyncio.Lock variant that tracks the owning task for BPO-31647 safety.
+
+    Drop-in replacement for ``asyncio.Lock`` plus ``held_by_current_task()``.
+    Used to safely fix the wait_for-acquire race documented in BPO-31647:
+    when ``asyncio.wait_for(lock.acquire(), timeout=...)`` raises
+    ``TimeoutError`` after acquire succeeded, the caller can call
+    ``held_by_current_task()`` to detect the race and release safely.
+
+    The internal ``acquire()`` also handles the tighter race where
+    cancellation arrives between ``self._lock.acquire()`` returning and
+    ``self._owner_task = ...`` being set: the except branch checks if
+    the underlying lock is held with no owner-task and releases manually.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner_task: asyncio.Task[Any] | None = None
+
+    async def acquire(self) -> None:
+        try:
+            await self._lock.acquire()
+        except asyncio.CancelledError:
+            # Cancellation can land between acquire's atomic step and
+            # this function's return. If the underlying lock IS held
+            # but no owner-task is set, we just acquired it; release.
+            if self._lock.locked() and self._owner_task is None:
+                try:
+                    self._lock.release()
+                except RuntimeError:
+                    # Lock was released externally — nothing to do.
+                    pass
+            raise
+        else:
+            self._owner_task = asyncio.current_task()
+
+    def release(self) -> None:
+        self._owner_task = None
+        self._lock.release()
+
+    def held_by_current_task(self) -> bool:
+        """True iff the lock is held AND its owner is the current task.
+
+        Used by callers that need to distinguish "I hold the lock"
+        from "someone holds it" — critical for BPO-31647 cleanup.
+        """
+        return (
+            self._owner_task is not None
+            and self._owner_task is asyncio.current_task()
+        )
+
+    def locked(self) -> bool:
+        """Compat shim: True if any task holds the underlying lock."""
+        return self._lock.locked()
+
+
 # Module-level singleton: one GPU job at a time per FastAPI worker
 # process (ADR-005). Re-binding this in tests is intentional in some
 # concurrency tests; production code never reassigns it.
-_orchestrator_lock: asyncio.Lock = asyncio.Lock()
+_orchestrator_lock: _OrchestrationLock = _OrchestrationLock()
 
 
 class GPUBusy(Exception):
@@ -313,10 +382,21 @@ async def orchestrate(
         else settings.pipeline_timeout_seconds
     )
 
+    # CR-2: explicit `acquired` flag tracks whether THIS task owns the
+    # lock. Replaces the prior `if _orchestrator_lock.locked(): release()`
+    # defensive guard which read GLOBAL state and could incorrectly release
+    # another task's hold.
+    acquired = False
     try:
         await asyncio.wait_for(_orchestrator_lock.acquire(), timeout=lock_to)
+        acquired = True
     except asyncio.TimeoutError as exc:
-        # Lock NOT acquired — nothing to release in finally below.
+        # CR-1 (BPO-31647 mitigation): wait_for can raise TimeoutError
+        # after the inner acquire() succeeded — leaving the lock held by
+        # this task without `acquired` having been set. Detect via the
+        # owner-task tracker built into _OrchestrationLock and release.
+        if _orchestrator_lock.held_by_current_task():
+            _orchestrator_lock.release()
         raise GPUBusy(retry_after=retry) from exc
 
     try:
@@ -341,9 +421,9 @@ async def orchestrate(
     except asyncio.TimeoutError as exc:
         raise PipelineTimeout(timeout_seconds=pipe_to) from exc
     finally:
-        # AC-7: release the lock no matter what propagated through the try.
-        # ``locked()`` guard is defensive — under normal flow we always hold
-        # it here, but a future refactor that re-arranges the acquire could
-        # otherwise raise ``RuntimeError: Lock is not acquired``.
-        if _orchestrator_lock.locked():
+        # AC-7 + CR-2: release based on the explicit `acquired` flag, NOT
+        # on `_orchestrator_lock.locked()`. The latter is global state and
+        # could be True due to ANOTHER task holding it — releasing in that
+        # case would unlock theirs incorrectly.
+        if acquired:
             _orchestrator_lock.release()
