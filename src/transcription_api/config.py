@@ -27,6 +27,19 @@ class Settings(BaseSettings):
     pipeline_timeout_seconds: int = Field(
         default=1800, alias="PIPELINE_TIMEOUT_SECONDS", gt=0
     )
+    # Capa 3 — model identifiers consumed by the lifespan loaders.
+    whisper_model: str = Field(default="large-v3", alias="WHISPER_MODEL")
+    whisper_device: str = Field(default="cuda", alias="WHISPER_DEVICE")
+    pyannote_model: str = Field(
+        default="pyannote/speaker-diarization-3.1", alias="PYANNOTE_MODEL"
+    )
+    # SD-1 (spec §7): hard cap on audio duration to bound the pipeline cost
+    # and prevent users from queueing 10h files that the rig cannot finish
+    # within PIPELINE_TIMEOUT_SECONDS. Enforced in normalize after ffprobe
+    # measures the duration; surfaced as 413 AUDIO_TOO_LARGE.
+    max_audio_duration_seconds: int = Field(
+        default=7200, alias="MAX_AUDIO_DURATION_SECONDS", gt=0
+    )
 
     # --- Persistencia (Postgres) -------------------------------------------
     postgres_user: str = Field(default="transcription", alias="POSTGRES_USER")

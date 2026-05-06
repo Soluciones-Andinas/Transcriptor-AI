@@ -16,6 +16,7 @@
 | RF-AUTH-05 | Manejar errores del provider | FastAPI Auth | MS Entra timeout o 5xx | Excepción | 502 + redirect `/login?error=AUTH_PROVIDER_UNAVAILABLE` | Given MS down, when callback, then user redirected con error |
 | RF-AUTH-06 | `GET /auth/me` | Usuario | Cookie sesión válida | — | JSON con user + bearer activo (sin plaintext) | Given user logueado, when GET /auth/me, then 200 con datos |
 | RF-AUTH-07 | `POST /auth/regenerate-mcp-token` | Usuario | Cookie sesión válida | — | Nuevo bearer plaintext + revoca anterior | Given user logueado, when regenerate, then nuevo bearer y viejo revocado |
+| RF-AUTH-08 | Banner UI sobre estado del bearer post-logout (ALT-1) | UI / Usuario | Páginas `/mcp-setup` y `/auth/me` | Estado del bearer activo del user | Mensaje visible explicando que `POST /auth/logout` no revoca el bearer | Given user post-logout, when carga `/mcp-setup` o `/auth/me`, then ve banner que indica que el bearer sigue activo y cómo revocarlo |
 
 ---
 
@@ -71,6 +72,7 @@ Sin errores propios; `RF-AUTH-05` cubre fallas de comunicación.
 
 - **User ya logueado** (cookie `session` válida): `GET /auth/login` redirect directo a `/mcp-setup` sin iniciar flow.
 - **Doble click en login**: cada call genera nuevo state y verifier; el más reciente prevalece (cookie pisa).
+- **Multi-tab**: si el user abre `/auth/login` en una segunda tab/ventana mientras la primera todavía está esperando consent en Microsoft, la cookie `oauth_state` de la segunda tab **pisa** la de la primera (mismo nombre, path, domain). Al volver del callback con el `state` query param de la primera tab, el match contra la cookie actual falla → `AUTH_INVALID_STATE` (RF-AUTH-02). Comportamiento esperado y documentado: la última `/auth/login` gana, las anteriores deben re-iniciar el flow. No es un bug; es la consecuencia natural de tener una cookie nombrada per-domain.
 
 ### Data Model Impact
 
@@ -490,5 +492,116 @@ Scenario: User no logueado intenta regenerar
 | TP-AUTH-07-pos-01 | Positivo (revocación + emisión) |
 | TP-AUTH-07-pos-02 | Positivo (bearer viejo es rejected en MCP tras regenerate) |
 | TP-AUTH-07-neg-01 | Negativo (sin auth) |
+
+**TODO explicit = 0**.
+
+---
+
+## RF-AUTH-08: Banner UI sobre estado del bearer post-logout
+
+### Execution Sheet
+
+| Campo | Valor |
+|---|---|
+| ID | RF-AUTH-08 |
+| Título | Comunicar al user que el logout web NO revoca el bearer MCP |
+| Actor primario | UI (frontend) |
+| Actor secundario | Usuario logueado o recién deslogueado |
+| Prioridad | Media |
+| Severidad | Mayor (regresión de UX si no se comunica; el user puede creer "estoy fuera" mientras el bearer en Claude Desktop sigue activo) |
+| Flujo origen | ALT-1 del SPEC-capa2 (logout NO revoca bearer) — formalizado a requisito UI |
+
+### Contexto
+
+El comportamiento implementado por `POST /auth/logout` (RF-AUTH-02 + ALT-1):
+
+- Borra la cookie `session` web.
+- **NO** revoca el bearer MCP del user.
+
+Razón documentada: el user puede estar usando el bearer desde Claude Desktop (sin browser involucrado en esa sesión); revocar al logout web sería una sorpresa destructiva. Para revocar explícitamente, el user usa `POST /auth/regenerate-mcp-token` (RF-AUTH-07).
+
+Este comportamiento es invisible al usuario sin ayuda de la UI: si el user piensa "logout = sesión cerrada por completo", el bearer queda en uso silencioso. RF-AUTH-08 pide que la UI haga ese estado explícito.
+
+### Precondiciones detalladas
+
+| # | Condición | Verificación |
+|---|---|---|
+| 1 | Páginas `/mcp-setup` y `/auth/me` (frontend) están renderizadas | UI build |
+| 2 | El backend expone el estado del bearer activo via `GET /auth/me` (RF-AUTH-06) | Already shipped |
+
+### Inputs
+
+Sin inputs explícitos. La UI consume `GET /auth/me` para conocer el estado del bearer y renderiza el banner.
+
+### Process Steps (Happy Path)
+
+| # | Paso | Componente |
+|---|---|---|
+| 1 | Al cargar `/mcp-setup` o `/auth/me`, la UI llama `GET /auth/me` | Frontend |
+| 2 | Si `bearer.id != null` (existe un bearer activo del user), renderizar el banner | Frontend |
+| 3 | Banner texto sugerido (español): "Tu MCP bearer sigue activo después del logout web. Para revocarlo, usá `POST /auth/regenerate-mcp-token` o el botón 'Revocar bearer'." | Frontend |
+| 4 | Banner action: link / botón visible que dispara `POST /auth/regenerate-mcp-token` (RF-AUTH-07) y muestra el nuevo plaintext | Frontend |
+
+### Outputs
+
+| Campo | Tipo | Destino | Efecto |
+|---|---|---|---|
+| Banner UI con texto + botón | Render React | DOM | El user entiende que el bearer es independiente de la cookie web |
+| Botón "Revocar bearer" funcional | UI binding | Frontend → Backend | Triggers RF-AUTH-07 |
+
+### Typed Errors
+
+Sin errores propios. Los errores del backend (`AUTH_NOT_AUTHENTICATED`, `INTERNAL_ERROR`) son responsabilidad de los RFs invocados (`RF-AUTH-06`, `RF-AUTH-07`).
+
+### Special Cases and Variants
+
+- **User sin bearer activo** (caso raro post-logout antes de regenerate): banner cambia a "No tenés un bearer MCP activo. Iniciá sesión nuevamente para que se emita uno." — no expone el botón de revocar.
+- **User con flash cookie `mcp_bearer_flash` vigente**: la UI ya está mostrando el plaintext nuevo; el banner no se muestra (no hay nada que comunicar — el user acaba de ver el bearer).
+
+### Data Model Impact
+
+Ninguno. RF-AUTH-08 es un requisito puramente UI; consume API existente.
+
+### Expanded Acceptance Criteria (Gherkin)
+
+```gherkin
+Scenario: User accede a /mcp-setup post-logout
+  Given el user no tiene cookie session
+    And tiene un bearer activo en mcp_bearers
+  When la UI carga /mcp-setup
+  Then se llama GET /auth/me retorna 401
+    And la UI redirect a /login
+
+Scenario: User logueado accede a /auth/me y ve el banner
+  Given el user tiene cookie session válida
+    And tiene un bearer activo (RF-AUTH-04)
+    And no tiene flash cookie de bearer recién emitido
+  When la UI carga /auth/me
+  Then la respuesta incluye {bearer: {id: ..., plaintext: null}}
+    And la UI renderiza el banner explicativo
+    And el banner incluye un botón visible "Revocar bearer"
+
+Scenario: User clica "Revocar bearer"
+  Given el banner está visible
+  When el user clica el botón
+  Then la UI llama POST /auth/regenerate-mcp-token (RF-AUTH-07)
+    And muestra el nuevo plaintext una sola vez
+    And refresca el banner para reflejar el nuevo bearer.id
+```
+
+### Test Traceability
+
+| Test ID | Tipo |
+|---|---|
+| TP-AUTH-08-pos-01 | Positivo (banner visible cuando bearer.id != null y plaintext == null) |
+| TP-AUTH-08-pos-02 | Positivo (banner oculto cuando flash cookie está vigente) |
+| TP-AUTH-08-neg-01 | Negativo (banner no se muestra cuando no hay bearer activo) |
+| TP-AUTH-08-int-01 | Integración (botón "Revocar bearer" dispara RF-AUTH-07) |
+
+### No Ambiguities Left
+
+- **Forbidden assumptions**: el banner no debe pretender que el logout web revoca el bearer; la implementación actual del backend (ALT-1) es deliberada.
+- **Closed decisions**: texto en español rioplatense, botón explícito (no link sutil), siempre visible si `bearer.id != null` y `plaintext == null`.
+- **Out of scope**: notificaciones email del estado del bearer (no necesario para v0.1).
 
 **TODO explicit = 0**.

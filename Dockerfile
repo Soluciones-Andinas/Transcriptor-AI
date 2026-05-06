@@ -37,14 +37,27 @@ WORKDIR /app
 # cambio de código invalida la layer de install. Para este proyecto con
 # deps estables y src/ chico, es aceptable. Si deps crecen, mover a un
 # patrón requirements.txt-first.
+#
+# Capa 3 (D-029): mantenemos single-stage. Multi-stage (plan original)
+# ahorraría ~1-2 GB de compilers en una imagen final que ya pesa ~10-12 GB
+# por CUDA + torch + whisperx + pyannote. La ganancia es marginal frente
+# a la complejidad. Decision priority §4: Simplicity > Performance.
 COPY pyproject.toml ./
 COPY src/ ./src/
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 
+# Capa 3 — install [pipeline] extras (whisperx, pyannote.audio, ffmpeg-python,
+# torch, torchaudio). Pre-install torch + torchaudio from the PyTorch CUDA 12.1
+# index because the default PyPI ships CPU-only wheels by default; we need the
+# cu121 wheels to talk to the rig's RTX 4060 Ti. Subsequent pip install of
+# `.[pipeline]` then sees torch already satisfied and only adds whisperx +
+# pyannote.audio + ffmpeg-python.
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install . \
+    && pip install --extra-index-url https://download.pytorch.org/whl/cu121 \
+        "torch>=2.1.0" "torchaudio>=2.1.0" \
+    && pip install ".[pipeline]" \
     && chmod +x /usr/local/bin/entrypoint.sh
 
 # Crear DATA_DIR (el volumen lo monta encima en runtime, pero esto cubre el caso sin volumen)

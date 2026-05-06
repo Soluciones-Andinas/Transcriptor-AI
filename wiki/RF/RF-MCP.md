@@ -9,6 +9,7 @@
 
 | ID | Título | Actor | Pre-condición | Entradas | Salidas |
 |---|---|---|---|---|---|
+| RF-MCP-00 | Contrato base del módulo MCP (transversal) | — | — | — | — |
 | RF-MCP-01 | Tool `request_upload_url` | Bearer válido | Bearer activo | `kind, file_size_bytes, mime_type?, transcription_id?` | `{upload_url, upload_id, bearer, expires_at}` |
 | RF-MCP-02 | Tool `start_transcription` | Bearer válido | upload uploaded | `upload_id, language?, max_speakers?, min_speakers?` | `{transcription_id, status, cache_hit}` |
 | RF-MCP-03 | Endpoint REST `POST /api/upload` (audio + image) | Bearer válido | upload session vigente | multipart `file` + bearer + nonce | `{ok, upload_id}` o `{ok, image_id}` |
@@ -20,6 +21,66 @@
 | RF-MCP-09 | Tool `delete_transcription` | Bearer válido | — | `transcription_id` | `{ok}` |
 | RF-MCP-10 | Tool `get_user_info` | Bearer válido | — | — | user + bearer info |
 | RF-MCP-11 | Auth middleware MCP | — | — | header `Authorization: Bearer <token>` | continúa o rechaza |
+
+---
+
+## RF-MCP-00: Contrato base del módulo MCP (transversal)
+
+### Propósito
+
+Anchor estable que define el contrato de superficie del módulo MCP — transporte, autenticación, scoping, naming, URL pública. Los demás RFs del módulo (RF-MCP-01..11) y los specs de capas posteriores que necesiten referenciar "el contrato MCP" lo hacen contra esta sección, no contra implementación específica.
+
+Este RF NO describe un endpoint o tool concreto: define los invariantes que TODOS los endpoints + tools + resources del módulo deben cumplir.
+
+### Transporte
+
+- **Protocolo**: MCP Streamable HTTP (no stdio, no SSE deprecated). Decisión: [ADR-011](../ADR/ADR-011.md).
+- **URL pública**: `${PUBLIC_BASE_URL}/mcp`. La variable `PUBLIC_BASE_URL` se configura en `.env` (default `http://localhost:8000`); el Claude del user llama a esa URL desde Claude Code o Claude Desktop.
+- **Discovery**: el endpoint público `GET /auth/me` (RF-AUTH-06) devuelve el campo `mcp_url` ya construido para que la UI del paso `/mcp-setup` (RF-UI-02) muestre la config lista para copiar.
+
+### Autenticación
+
+- **Esquema**: `Authorization: Bearer <plaintext>` con bearer emitido por RF-AUTH-04 (primer login) o RF-AUTH-07 (regenerate). El `<plaintext>` es ~64 chars URL-safe; en DB se almacena solo el `SHA-256(plaintext)` como `token_hash`.
+- **Validación**: implementada en RF-MCP-11 (middleware). Cada tool / resource / endpoint REST del módulo debe pasar por el middleware antes del handler.
+- **Códigos de error**: `MCP_BEARER_INVALID` (401), `MCP_BEARER_REVOKED` (401). Nunca `403` — la ausencia de bearer válido se trata como "no autenticado", no "no autorizado".
+
+### Per-user scoping
+
+- **Mecanismo**: SQLAlchemy `do_orm_execute` event listener fail-closed ([ADR-015](../ADR/ADR-015.md), reemplaza [ADR-014](../ADR/ADR-014.md)). El middleware (RF-MCP-11) setea `session.info["user_id"] = bearer.user_id` post-validación; toda query subsecuente sobre per-user models recibe el filtro `WHERE user_id = X` automáticamente.
+- **Garantía**: una tool / resource handler NO puede leakear datos de otros users aunque omita el `WHERE user_id = X` explícito en la query. Si la dependency de auth se omite por error, la query raise `ScopingNotArmedError` (no leak silencioso).
+- **Bypass intencional**: solo para auth lookups y mantenimiento administrativo, vía `with bypass_scoping(session): ...`. Nunca dentro de un tool/resource handler de Capa 6.
+
+### Naming convention
+
+| Elemento | Convención | Ejemplos |
+|---|---|---|
+| Tool name | `snake_case`, prefijo `_my_` para tools per-user; verbo + sustantivo | `request_upload_url`, `list_my_transcriptions`, `delete_transcription` |
+| Resource URI | `transcription://<id>` o `transcription://<id>/images/<image_id>` (jerarquía de recursos del user) | RF-MCP-07, RF-MCP-08 |
+| Error code | `<MODULO>_<CAUSA>` en SCREAMING_SNAKE_CASE; lista cerrada en `05_modelo_datos.md` §8 | `MCP_BEARER_INVALID`, `TRANSCRIPTION_NOT_FOUND` |
+| Field name | `snake_case` siempre, también en payloads JSON al cliente MCP | `audio_hash`, `cache_hit`, `num_speakers` |
+
+### Side effects en cada call autenticado
+
+- **`mcp_bearers.last_used_at`**: bumped a `clock_timestamp()` en cada hit autenticado (RF-MCP-11 step 6). Best-effort: un fallo en el commit de este bump NO debe rechazar el request del user.
+- **Logs estructurados**: cada tool / resource call emite log JSON con `request_id`, `user_id`, `tool_name` o `resource_uri`, `duration_ms`, `cache_hit` (si aplica), `error_code` (si falla).
+
+### Out of scope del contrato base
+
+- Long-running tools (jobs > timeout HTTP del client MCP). En v0.1 todos los tools son sync (ADR-003). Async + job_id pattern queda para v2.
+- Streaming de outputs (server-sent events dentro del MCP transport). v0.1 retorna respuestas completas.
+- Tool versioning. v0.1 expone una sola versión; cuando haya breaking changes, prefijar con `_v2` y mantener legacy 1 release.
+
+### Test Traceability
+
+Este RF no genera tests propios — es un contrato. Los tests aparecen en RF-MCP-11 (middleware) y en cada RF de tool/resource. La consistencia con este contrato se valida en code review.
+
+### No Ambiguities Left
+
+- **Forbidden assumptions**: no se asume que el cliente MCP soporte session resumability; cada call es independiente desde el lado server.
+- **Closed decisions**: bearer en header (no en query string ni en body); SHA-256 hex como hash; scoping fail-closed por defecto.
+- **Out of scope**: federation con otros providers MCP; bridging a stdio.
+
+**TODO explicit = 0**.
 
 ---
 

@@ -104,5 +104,6 @@ addopts = "-m 'not e2e'"
 markers = [
     "requires_docker: test needs a running Docker daemon (testcontainers).",
     "requires_gpu: test needs a CUDA or MPS accelerator (skip otherwise).",
+    "requires_ffmpeg: test needs the ffmpeg/ffprobe binaries on PATH (Capa 3 pipeline).",
     "e2e: end-to-end smoke against `docker compose up` (slow, opt-in).",
 ]

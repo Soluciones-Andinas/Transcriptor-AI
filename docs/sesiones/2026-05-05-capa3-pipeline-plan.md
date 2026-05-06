@@ -575,21 +575,21 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 
 | Spec | Criterio | Test | Status |
 |---|---|---|---|
-| SPEC-capa3 | AC-1 | `test_post_transcription_with_valid_bearer` + orchestrator + normalize + stt + diarize + merge | [ ] |
-| SPEC-capa3 | AC-2 | `test_post_transcription_cache_hit_skips_pipeline` | [ ] |
-| SPEC-capa3 | AC-3 | `test_post_transcription_unauthenticated_401` | [ ] |
-| SPEC-capa3 | AC-4 | `test_normalize_rejects_unknown_format` + `test_post_rejects_exe_file` | [ ] |
-| SPEC-capa3 | AC-5 | `test_post_rejects_oversize` | [ ] |
-| SPEC-capa3 | AC-6 | `test_orchestrator_lock_serializes_two_jobs` | [ ] |
-| SPEC-capa3 | AC-7 | `test_lock_released_on_gpu_error` + `test_stt_maps_cuda_oom_to_gpu_error` | [ ] |
-| SPEC-capa3 | AC-8 | `test_get_returns_404_for_other_user` | [ ] |
-| SPEC-capa3 | AC-9 | `test_health_reports_models_ready_after_lifespan` | [ ] |
-| SPEC-capa3 | AC-10 | `test_cleanup_purges_expired_entries` | [ ] |
-| SPEC-capa3 | AC-11 | `test_orchestrator_pipeline_timeout` | [ ] |
-| SPEC-capa3 | AC-12 | `test_cache_writes_and_reads_per_user` | [ ] |
-| SPEC-capa3 | AC-13 | `test_get_returns_full_result_for_owner` | [ ] |
-| SPEC-capa3 | AC-14 | E2E rig smoke (manual, registrar en `vram-budget.md`) | [ ] |
-| SPEC-capa3 | AC-15 | `test_pyannote_load_failure_keeps_service_up` + `test_post_returns_503_when_pyannote_failed_to_load` | [ ] |
+| SPEC-capa3 | AC-1 | Pipeline layers (23 unit tests) + orchestrator (4 integration tests, requires_docker) + POST E2E: `test_post_transcription_with_valid_bearer_returns_200` (requires_docker). Full chain closed end-to-end. | [x] |
+| SPEC-capa3 | AC-2 | `test_cache_writes_and_reads_per_user` + `test_cache_returns_none_on_miss` (substrate). End-to-end `test_post_transcription_cache_hit_skips_pipeline` deferred to Batch 6. | [x] (substrate) / [ ] (E2E POST) |
+| SPEC-capa3 | AC-3 | `test_post_transcription_without_bearer_returns_401` + `test_post_transcription_with_malformed_bearer_returns_401` + `test_get_without_bearer_returns_401` | [x] |
+| SPEC-capa3 | AC-4 | normalize layer: `test_normalize_rejects_extension_outside_whitelist` + `test_normalize_rejects_magic_bytes_mismatch`. API surface: `test_post_rejects_audio_format_invalid_with_400`. | [x] |
+| SPEC-capa3 | AC-5 | `test_post_rejects_oversize_via_content_length_413` (Content-Length pre-check + orchestrate not-called assertion) | [x] |
+| SPEC-capa3 | AC-6 | `test_orchestrator_serializes_two_concurrent_jobs_with_gpu_busy` + `test_orchestrator_lock_released_after_happy_completion` + `test_pipeline_timeout_is_distinct_from_gpu_busy` | [x] |
+| SPEC-capa3 | AC-7 | STT mapping (5 tests) + orchestrator lock-release (3 tests) + POST 500 mapping: `test_post_maps_gpu_error_to_500` + `test_post_maps_pipeline_normalize_error_to_500` + `test_post_maps_pipeline_diarize_error_to_500` + `test_post_maps_unexpected_exception_to_500_with_error_id`. | [x] |
+| SPEC-capa3 | AC-8 | `test_get_cross_user_returns_404_no_existence_leak` + `test_get_nonexistent_id_returns_404_same_shape` (no-existence-leak invariant) | [x] |
+| SPEC-capa3 | AC-9 | `test_health_reports_models_ready_after_lifespan` + `test_load_whisper_returns_object_with_transcribe` | [x] |
+| SPEC-capa3 | AC-10 | `purge_expired` (11 unit tests in test_cleanup.py: stale/fresh, multi-user, empty-dir cascade, concurrent-safety, defensive) + lifespan wiring (3 integration tests in test_cleanup_lifespan.py: task created, purge invoked, cancelled on shutdown) | [x] |
+| SPEC-capa3 | AC-11 | `test_orchestrator_pipeline_timeout_raises_typed_error` (PipelineTimeout + lock release post-timeout) | [x] |
+| SPEC-capa3 | AC-12 | `test_cache_writes_and_reads_per_user` + `test_cache_isolates_users_via_filesystem_path` | [x] |
+| SPEC-capa3 | AC-13 | `test_get_returns_full_result_for_owner` | [x] |
+| SPEC-capa3 | AC-14 | E2E rig smoke (manual). Template entregable: `docs/sesiones/2026-05-05-capa3-vram-budget.md` con secciones empty-fields para que el operador registre VRAM peak (≤ 7,500 MB), latencia, cache_hit second-pass, WER subjetivo, sign-off. | [x] template entregable; medición rig pendiente |
+| SPEC-capa3 | AC-15 | Load failure surface (5 tests) + POST 503 propagation: `test_post_returns_503_when_pyannote_failed_to_load` + `test_post_returns_503_when_whisper_failed_to_load` (with detail discriminator + Retry-After). | [x] |
 
 ---
 

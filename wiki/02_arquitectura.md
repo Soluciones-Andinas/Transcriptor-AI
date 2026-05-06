@@ -175,7 +175,8 @@ sequenceDiagram
 | [ADR-011](ADR/ADR-011.md) | MCP Server como protocolo principal + REST mínimo para blobs | Aceptada | 2026-04-30 | §3, §4 — define superficie de integración |
 | [ADR-012](ADR/ADR-012.md) | Generación de minutas en Claude del user | Aceptada | 2026-04-30 | §1 alcance, §3 — ningún componente backend genera minutas |
 | [ADR-013](ADR/ADR-013.md) | Upload de blobs vía endpoints HTTP autenticados | Aceptada | 2026-04-30 | §3, §4 — define `/api/upload`, `/api/upload-image` |
-| [ADR-014](ADR/ADR-014.md) | Per-user scoping enforcement vía SQLAlchemy event listener | Aceptada | 2026-05-04 | §3 — Capa 1 instala listener; Capa 2 setea `session.info["user_id"]` en middleware |
+| [ADR-014](ADR/ADR-014.md) | Per-user scoping enforcement vía SQLAlchemy event listener | Reemplazada por ADR-015 | 2026-05-04 | §3 — versión fail-open original |
+| [ADR-015](ADR/ADR-015.md) | Listener de scoping fail-closed + `bypass_scoping` context manager | Aceptada | 2026-05-05 | §3, §8 — query sin `user_id` armado raise `ScopingNotArmedError`; bypass explícito vía context manager |
 
 ## 8. Seguridad, Observabilidad y Resiliencia
 
@@ -183,7 +184,7 @@ sequenceDiagram
 - Autenticación obligatoria en todos los endpoints excepto `/api/health`, `/auth/login`, `/auth/callback`, `/`. Implementada vía Microsoft Entra ID OIDC ([ADR-009](ADR/ADR-009.md)).
 - Bearer tokens vinculados a `user_id` en Postgres; revocables desde la UI.
 - Cookie web de sesión: `HttpOnly`, `Secure`, `SameSite=Strict`, JWT firmado con clave del backend.
-- Per-user scoping estricto en MCP: cada tool y resource opera bajo la identidad del bearer. Implementado en código via SQLAlchemy `do_orm_execute` event listener ([ADR-014](ADR/ADR-014.md)) que inyecta `WHERE user_id = X` automáticamente cuando `session.info["user_id"]` está seteado por el middleware de Capa 2.
+- Per-user scoping estricto en MCP: cada tool y resource opera bajo la identidad del bearer. Implementado en código via SQLAlchemy `do_orm_execute` event listener ([ADR-015](ADR/ADR-015.md), reemplaza [ADR-014](ADR/ADR-014.md)) que inyecta `WHERE user_id = X` automáticamente cuando `session.info["user_id"]` está seteado por el middleware. **Fail-closed por defecto**: una query contra un per-user model sobre una sesión sin `user_id` armado ni `scoping_bypass` raise `ScopingNotArmedError` (no leak silencioso). Bypass explícito vía `with bypass_scoping(session): ...` para auth lookups y mantenimiento administrativo.
 - Secretos (HF_TOKEN, Postgres password, JWT secret, MS app client secret) en `.env` montado al contenedor; nunca commiteados.
 - Logs redactan el header `Authorization` para no exponer bearers en disco.
 - Validación de inputs en frontera (FastAPI + Pydantic): tamaño máximo de upload, formato, parámetros numéricos, validación de UUIDs.

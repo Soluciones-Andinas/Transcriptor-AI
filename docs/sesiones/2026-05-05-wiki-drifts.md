@@ -211,21 +211,30 @@ Patrón Node-style "copy manifest → install deps → copy code" para maximizar
 > wiki drifts para hacer correciones luego") las correcciones al wiki se
 > defieren a una sesión dedicada. Estas entradas son la lista accionable.
 
-### D-013 🟠 RF-AUTH-02 status code: spec dice 200, implementación devuelve 302
+### D-013 🟢 [CERRADO — wiki ya correcto] RF-AUTH-02 status code: SPEC drift, NO wiki drift
 
-**Asumido (RF-AUTH-02 / SPEC-capa2-auth-msentra-v1)**: la response a `GET /auth/callback` debe ser HTTP 200 con `Set-Cookie: session=...` y body con shape `{ user, bearer, mcp_url }`.
+**Asumido (cuando se escribió esta entrada)**: el SPEC interno
+`docs/sesiones/2026-05-05-capa2-auth-spec.md` decía 200; la wiki
+`wiki/RF/RF-AUTH.md` también decía 200; la implementación devolvía 302.
 
-**Reality**: la implementación devuelve `HTTP 302 → /mcp-setup` con `Set-Cookie: session=...` + flash. Esto es el patrón estándar de OAuth web (post-callback redirect a la SPA), preferido sobre 200-with-body porque:
-1. Si el cliente sigue redirects, aterriza en `/mcp-setup` con cookies seteadas listas para `GET /auth/me`.
-2. Body 200 al callback obliga al SPA a leer JSON de la respuesta del callback, que es awkward — el callback típicamente se navega como página, no se fetchea como API.
+**Reality (verificación 2026-05-05 sesión wiki dedicada)**: la wiki
+**ya decía 302** desde el refactor 2.0 (RF-AUTH.md líneas 13 y 160 —
+"302 redirect a /mcp-setup", "Responder 302 a /mcp-setup con Set-Cookie
+session"). Solo el SPEC interno temporal divergía. La wiki nunca tuvo el
+bug; mi entrada original de drift estaba basada en una mis-lectura del
+estado de la wiki.
 
-**Resolución elegida (CR-6, instrucción explícita Franco)**: mantener 302. Wiki debe corregirse para reflejar el contrato real.
+**Resolución elegida (CR-6, instrucción explícita Franco)**: mantener
+302 en código + spec. Sin acción wiki necesaria (wiki ya correcta).
 
-**Acción pendiente sobre wiki**:
-- `wiki/RF/RF-AUTH.md` RF-AUTH-02: cambiar el status code de respuesta del callback de 200 a 302 con Location: /mcp-setup. Documentar que el body shape `{ user, bearer, mcp_url }` ahora se sirve por `GET /auth/me` (RF-AUTH-06), no por el callback. Tests integration ya validan 302 + Location.
-- `wiki/06_matriz_pruebas_RF.md`: actualizar la fila de AC-8 si se refiere al status del callback.
+**Acción pendiente sobre wiki**: ninguna. (Originalmente listada como
+"cambiar 200→302" pero la verificación mostró que no aplica).
 
-**Lección**: specs deberían modelar OAuth flows como secuencia de redirects, no como una sola request/response. El "happy path" de OAuth es naturalmente 3+ saltos.
+**Lección**: cuando se documenta un drift, validar el estado actual de
+la wiki/spec/código antes de listar acciones. Asumir el contenido del
+file sin abrirlo lleva a entradas falsas en el log; el log pierde
+credibilidad cuando el lector futuro descubre que "la acción ya estaba
+hecha desde antes".
 
 ---
 
@@ -382,32 +391,540 @@ y montar en una mini app con la dependencia `Depends(get_current_user_mcp)`.
 
 ---
 
+### D-029 🟡 Capa 3 Batch 1: single-stage Dockerfile elegido vs multi-stage del plan
+
+**Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-plan.md` Task 1.1)**: el GREEN
+del Dockerfile usa un patrón multi-stage (`builder` con `nvidia/cuda:...-devel`,
+`runtime` con `nvidia/cuda:...-runtime`) para no arrastrar compilers al runtime.
+
+**Reality (este commit)**: el `Dockerfile` ya existía single-stage con justificación
+in-place ("Single-stage build: la imagen runtime ya pesa ~5 GB por CUDA, multi-stage
+no aporta"). Con `[pipeline]` extras la imagen final pesa ~10-12 GB; el ahorro
+multi-stage de ~1-2 GB de compilers es marginal frente a la complejidad adicional
+de una segunda stage + COPY explícito de site-packages.
+
+**Resolución (commit `52f8de5`)**: mantener single-stage. Agregar pre-install de
+torch+torchaudio con `--extra-index-url cu121` y luego `pip install ".[pipeline]"`.
+Comment del Dockerfile actualizado para anotar el trade-off (CLAUDE.md §4 priority:
+Simplicity > Performance).
+
+**Acción pendiente**: ninguna. Si el rig en Task 7.3 reporta un build > 12 GB que
+duele en transferencias, reconsiderar multi-stage en una sesión específica con
+nuevo ADR.
+
+**Lección**: cuando un plan propone una técnica (multi-stage), revisar si el costo
+real (size, complexity) la justifica con la decision priority del proyecto antes
+de aplicar literalmente. El plan es hipótesis; el código en producción es el voto
+definitivo. Documentar el voto en este log evita que un futuro lector crea que
+hubo descuido.
+
+---
+
+### D-030 🟡 Capa 3 Batch 1: heavy ML imports (torch, whisperx, pyannote) son lazy en `pipeline/{stt,diarize}.py`
+
+**Asumido (plan T1.2 RED test)**: los tests patcheaban
+`transcription_api.pipeline.stt.whisperx.load_model` y
+`transcription_api.pipeline.diarize.Pipeline.from_pretrained`, lo que requiere
+que `whisperx` y `pyannote.audio` estén importados al top del módulo.
+
+**Reality (este commit)**: las dev/CI machines son CPU-only y no tienen
+`[pipeline]` extras instalados (D-008 ya lo señaló para subagents; aquí se
+extiende a la suite local). Importar `whisperx` o `pyannote.audio` al top del
+módulo rompería el `import transcription_api.pipeline.stt` en cualquier máquina
+sin extras, lo que a su vez rompería `tests/unit/pipeline/test_model_loaders.py`
+y el `from .pipeline import stt` en `main.py`.
+
+**Resolución (commit `5b9a9ff`)**: introduzco indirecciones internas
+`_whisperx_load_model(...)` (en `stt.py`) y `_pyannote_from_pretrained(...)`
+(en `diarize.py`) que importan la lib pesada dentro del cuerpo de la función.
+Los tests patchean estas indirecciones en lugar de la lib upstream. El módulo
+es importable sin `[pipeline]` extras; sólo invocar el loader requiere la lib.
+
+**Acción pendiente**: ninguna inmediata. Los Batches 3-5 deben mantener el
+mismo patrón cuando agreguen wrappers `transcribe`, `diarize`, `merge` (las
+indirecciones siempre dentro de `pipeline.*`, nunca en `main.py` ni en
+`api/transcriptions.py`).
+
+**Lección**: planes que asumen heavy imports al top funcionan en la dev box
+del autor pero rompen en CI / en máquinas magras. Cuando el extras está
+gated por hardware (GPU), priorizar lazy imports + indirección patcheable
+es un default robusto, no over-engineering.
+
+---
+
+## Categoría 8 — Drifts del deployment al rig (operacionales, 2026-05-05)
+
+> Estas drifts surgieron durante el primer levantamiento real de la imagen
+> Docker en el rig RTX 4060 Ti, después del merge de Capa 2 a master. Son
+> bugs / asunciones que pasaron desapercibidos en dev local porque la
+> superficie de validación (pytest contra la `.venv` con `[dev]` extras)
+> no ejerce las mismas paths que `pip install .` dentro de un container.
+> Capturadas para que futuros deployments no las repitan + para informar
+> el "deployment runbook" de Capa 7 cuando exista.
+
+### D-031 🟠 logging.json access formatter: campos `client_addr` / `request_line` / `status_code` no existen en uvicorn LogRecord
+
+**Asumido (`src/transcription_api/logging.json` original Capa 1)**:
+```json
+"access": {
+  "format": "%(asctime)s %(levelname)s access %(client_addr)s \"%(request_line)s\" %(status_code)s"
+}
+```
+La asunción era que el `uvicorn.access` logger emite LogRecords con
+atributos nombrados `client_addr`, `request_line`, `status_code`.
+
+**Reality (logs del primer arranque en rig 2026-05-05)**: uvicorn emite
+los datos como argumentos posicionales dentro del template del mensaje
+(`'%s - "%s %s HTTP/%s" %d', client_addr, method, path, version, status`)
+y el LogRecord NO tiene esos atributos como `record.client_addr` etc. El
+formatter custom raise `KeyError: 'client_addr'` en cada GET /health,
+contaminando el stdout con un traceback completo por request HTTP exitoso.
+La request en sí seguía funcionando (status 200, body correcto); solo
+el handler de logging emitía el error.
+
+**Resolución (commit `6dcacc4`)**: cambio del format a
+`"%(asctime)s %(levelname)s access %(message)s"` que usa el message
+template ya formateado por uvicorn. Output ahora limpio:
+`2026-05-05 18:35:29 INFO access 127.0.0.1:43932 - "GET /health HTTP/1.1" 200`.
+
+**Acción pendiente**: ninguna. Cubierto en el commit del rig fix.
+
+**Lección**: la review multi-agente NO detecta bugs en archivos de
+configuración (logging.json, .env, Dockerfile) porque esos files están
+fuera del análisis de código Python. Para futuras capas, considerar un
+smoke test post-build dentro del container que ejecute al menos
+`GET /health` y grep ausencia de tracebacks en stderr antes de declarar
+la imagen "verde". Sin esto, el bug solo aparece en runtime real.
+
+---
+
+### D-032 🟠 `httpx` declarado en `[dev]` extras pero usado en runtime por `oauth_client`
+
+**Asumido (`pyproject.toml` original Capa 1)**:
+```toml
+[project.optional-dependencies]
+dev = [
+    ...
+    "httpx>=0.27.0",  # FastAPI test client + tests respx
+    ...
+]
+```
+Capa 1 no usaba `httpx` en runtime (FastAPI usa Starlette internamente,
+no necesita httpx). `[dev]` extras lo trae para que pytest pueda usar
+`AsyncClient` + `respx` en tests. Funcionaba localmente porque la
+`.venv` se instala con `pip install -e ".[dev]"`.
+
+**Reality (logs del primer build en rig 2026-05-05)**:
+```
+ModuleNotFoundError: No module named 'httpx'
+  File "src/transcription_api/auth/routes.py", line 47, in <module>
+    from .oauth_client import (...)
+  File "src/transcription_api/auth/oauth_client.py", line 33, in <module>
+    import httpx
+```
+Capa 2 introdujo `auth/oauth_client.py` que usa `httpx.AsyncClient`
+**en runtime** (para llamar `/token` y `/discovery/v2.0/keys` de MS).
+Esto se omitió al promoverlo de "uso en tests" a "uso en producción".
+La imagen Docker instala solo el core (`pip install .` sin extras),
+así que el container crash-loopaba en el `from .auth import router`
+durante startup.
+
+**Resolución (commit `d034b51`)**: promover `httpx>=0.27.0` del
+extras `[dev]` al `dependencies` core. La duplicación en `[dev]`
+quedó (pip dedupea automáticamente, no rompe nada).
+
+**Acción pendiente**: ninguna. Para Capa 3+, agregar al checklist de
+PR review pre-merge: si un módulo nuevo importa una lib de `[dev]`
+extras, mover a core ANTES del merge.
+
+**Lección**: el tipo de drift "passes locally fails in container" es
+recurrente cuando la dev box tiene más deps instaladas que la imagen
+prod. Un CI step que haga `pip install .` (sin extras) + import del
+package raíz en una imagen limpia hubiera atrapado esto sin necesidad
+de rig deployment. Considerar agregar al .github/workflows o equivalente
+cuando se introduzca CI.
+
+---
+
+### D-033 🟡 `POST GRES_PASSWORD` se hornea en el volume al primer `initdb`; cambios en `.env` no rotan la auth
+
+**Asumido (operador siguiendo el deployment guide)**: cambiar
+`POSTGRES_PASSWORD` en `.env` y reiniciar `docker compose` propaga la
+nueva password al servicio de Postgres.
+
+**Reality (primer `alembic upgrade head` en rig 2026-05-05)**:
+```
+psycopg.OperationalError: FATAL: password authentication failed for user "transcription"
+```
+El image oficial de `postgres:16-alpine` solo aplica `POSTGRES_USER` /
+`POSTGRES_PASSWORD` durante `initdb` (primer arranque del volume vacío).
+Una vez el volume tiene data, la imagen ignora esos env vars y la auth
+se chequea contra el password original baked into `pg_hba.conf` +
+`pg_authid`. Si el operador inicializó el volume con un placeholder
+(`change-me-in-production`) y después cambió `.env` al password real,
+el cluster sigue auth-eando con el placeholder.
+
+**Resolución (workaround dev)**:
+```bash
+docker compose down -v   # -v borra el named volume postgres-data
+docker compose up -d postgres   # initdb corre fresh con .env actual
+```
+Solo seguro en dev (data se pierde). En prod la rotación correcta es
+`ALTER USER ... PASSWORD '...';` con superuser dentro del cluster
+running.
+
+**Acción pendiente**:
+- Documentar en el deployment runbook (Capa 7) los dos casos:
+  primer-arranque vs rotación.
+- Considerar agregar al `entrypoint.sh` de la imagen un check que
+  emita un WARN si `POSTGRES_PASSWORD` del `.env` difiere del que
+  realmente acepta el cluster (no es trivial; podría ser un test
+  de connection con timeout).
+
+**Lección**: las imágenes oficiales de bases de datos tienen un
+contrato de "init-once, operate-forever" que el operador novato no
+intuye. Cualquier env var marcada como "credentials" en las imágenes
+oficiales (Postgres, MySQL, MongoDB, Redis) tiene esta misma semántica.
+El runbook de deployment debe ser explícito al respecto desde el día
+uno.
+
+---
+
+### D-036 🟢 Capa 3 Batch 5: cache stores `cache_hit: false` canónicamente, override a `true` en read-time
+
+**Asumido (intuición naïve)**: si el orchestrator detecta un cache hit
+(ALT-1) y persiste la fila marcada como `cache_hit: true`, lo natural
+sería ESCRIBIR `cache_hit: true` en el archivo del filesystem para que
+una lectura futura lo refleje.
+
+**Reality (este commit, `c9e6284`)**: el cache filesystem siempre
+guarda `metadata.cache_hit: false`. Cuando un cache hit ocurre, el
+orchestrator hace un override en memoria: `payload = {**cached,
+"metadata": {**cached.metadata, "cache_hit": True}}`. La fila de DB
+y el response sí llevan `cache_hit: true`; el archivo en disk no.
+
+**Resolución**: mantener la asimetría. El cache file representa "el
+trabajo computado por una corrida pasada" — su metadata es congelada
+al momento del compute (modelo, diarizer, compute_type). El flag
+`cache_hit` describe **esta** request, no la corrida histórica que
+generó el payload. Si todas las re-reads escribieran `true` en disk,
+después de N hits el archivo perdería la información de "cuándo se
+computó realmente esto" (porque cada hit pisa la metadata).
+
+**Acción pendiente**: ninguna. La invariante es un detalle del
+orchestrator y los tests T5.4 lo cubren explícitamente
+(`test_orchestrate_cache_hit_skips_stt_and_diarize` verifica
+`result.metadata.cache_hit is True`).
+
+**Lección**: cuando un flag existe en dos planos (request y storage),
+elegir cuál es la **fuente de verdad** y derivar el otro. Aquí el
+storage es immutable post-compute (`compute_hit: false` siempre);
+el flag de hit-vs-miss es una propiedad de la request, no del payload.
+
+---
+
+### D-037 🟢 Capa 3 Batch 5: orchestrator hace `flush()`, no `commit()`
+
+**Asumido (en algunos planes)**: los servicios de aplicación (use
+cases) controlan su propia transaction, terminándola con commit/rollback.
+
+**Reality (este commit, `c9e6284`)**: `_run_pipeline` hace `db.add(row)`
+y `await db.flush()` — pero NO `commit()`. La transacción queda
+abierta; el caller (la dependency `get_session()` en Batch 6) decide
+commit en el happy path y rollback si la request raisea.
+
+**Resolución**: mantener flush-only. Esto matchea el patrón FastAPI
++ SQLAlchemy 2.x async: la dependency es la dueña de la transaction
+(commit en `finally`, rollback en `except`). El orchestrator es
+re-usable en jobs offline (donde el caller maneja la transaction
+diferente) sin tener que parametrizar el commit boundary.
+
+**Acción pendiente**: cuando Batch 6 escriba el endpoint POST
+`/api/transcriptions`, asegurar que la dependency `get_session()`
+hace `await session.commit()` post-orchestrate (o tras un `try/except`
+que rollback). Si esa dependency aún no existe, crearla con ese contrato.
+
+**Lección**: separar "build the row" (orchestrator) de "commit the
+transaction" (request lifecycle owner) hace que el orchestrator sea
+re-usable en background workers sin tocar su firma.
+
+---
+
+### D-035 🟢 Capa 3 Batch 4: ALT-3 implementado como cap-by-relabel, no como pipeline re-run
+
+**Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-spec.md` ALT-3)**:
+> ALT-3: pyannote detecta más speakers que el `max_speakers` hint
+> → Honor el hint: re-run con `min=max=hint` o usar el resultado capped.
+> Decisión: respetar el hint estricto.
+
+La frase "re-run con min=max=hint" sugiere invocar el pipeline pyannote
+una segunda vez con los parámetros forzados — lo cual duplica latencia
+GPU y pico de VRAM en cada llamada con cap activo.
+
+**Reality (este commit, `25de530`)**: el wrapper implementa
+`_cap_speakers_by_duration` que opera sobre la salida ya producida —
+una sola pasada por pyannote, una sola pasada extra en CPU para:
+1. Sumar duración por speaker.
+2. Quedarse con los top-N por duración total (most-talkative win).
+3. Relabel cada segmento de un speaker no-top-N al speaker top-N
+   temporalmente más cercano (mid-point distance).
+
+**Resolución**: mantener cap-by-relabel. El spec acepta "o usar el
+resultado capped" como alternativa válida. El trade-off es:
+- **Pros**: una sola corrida del pipeline (~30s/min de audio en RTX
+  4060 Ti); sin pico extra de VRAM; sin riesgo de que el segundo run
+  con `min=max` no converja.
+- **Cons**: el resultado es ligeramente menos preciso porque pyannote
+  no "decidió" producir N speakers, sino que el wrapper colapsó
+  N+k a N a posteriori. Para reuniones con un speaker que habla 1%
+  del tiempo, ese speaker desaparece (queda relabeleado al cercano).
+
+**Acción pendiente**: si en Task 7.3 (rig smoke) un audio real revela
+que la pérdida de precisión es problemática, considerar agregar una
+flag `cap_strategy = "relabel" | "rerun"` y elegir por env var.
+Mientras tanto, default cap-by-relabel.
+
+**Lección**: cuando el spec ofrece dos alternativas equivalentes, el
+implementador elige la más simple por default (CLAUDE.md §4 priority:
+Simplicity > Performance > Cost) y documenta la decisión para que el
+reviewer la pueda contestar sin tener que descubrir el trade-off
+leyendo código.
+
+---
+
+### D-042 🟠 Capa 3 deployment: pyannote 4.x requiere TRES HF model accepts (no dos)
+
+**Asumido (spec §0.3 + deployment guide)**: aceptar terms en HF para
+`pyannote/speaker-diarization-3.1` y `pyannote/segmentation-3.0`.
+
+**Reality (rig deployment 2026-05-06, primer intento)**: pyannote.audio
+4.x agregó un **tercer modelo gated**, `pyannote/speaker-diarization-community-1`,
+que contiene el PLDA artifact (`xvec_transform.npz`) usado internamente
+por la pipeline `speaker-diarization-3.1`. Sin terms accept, el load
+falla con `huggingface_hub.errors.GatedRepoError: 403... Cannot access
+gated repo`.
+
+Cadena de causalidad observada en el rig:
+
+1. Operator acepta terms en los dos modelos del spec.
+2. Build pasa (los modelos se descargan lazy en runtime).
+3. Lifespan corre: Whisper carga ✓, pyannote carga → `Pipeline.from_pretrained`
+   triggea descarga del PLDA del tercer modelo → `GatedRepoError` 403.
+4. H-5 classifier match `"gated" in str(exc) or "403" in str(exc)` →
+   `DETAIL_TERMS_NOT_ACCEPTED`. /health surfacea el detail.
+5. Operator visita https://huggingface.co/pyannote/speaker-diarization-community-1,
+   acepta terms. Restart. Carga OK.
+
+**Por qué no lo atrapamos en review**: el modelo `community-1` es
+transitive dependency interna de pyannote 4.x. No aparece en docs
+top-level del modelo `speaker-diarization-3.1`. Solo se descubre al
+ejecutar `Pipeline.from_pretrained` contra HF en runtime.
+
+**Resolución (2026-05-06)**: documentar el tercer model accept como
+parte del deployment guide. Sin código a cambiar — el classifier H-5
+ya surfacea bien el error, el operator solo necesita saber qué hacer
+cuando lo ve.
+
+**Acción pendiente sobre wiki/spec**: agregar a `wiki/RF/RF-TRX.md`
+prerequisitos sección "HF model accepts" listando los TRES modelos
+(no solo dos). Idem en el deployment runbook futuro (D-033).
+
+**Lección**: las dependencias gated transitivas son invisibles hasta
+runtime contra HF real. Mitigación: smoke test contra HF en CI o
+pre-deploy script que valide el token tiene acceso a los N modelos
+listados, en vez de descubrirlo en producción.
+
+---
+
+### D-038 🟢 Capa 3 review SD-3: audio_hash es del PCM puro, no del WAV completo
+
+**Asumido (implementación inicial Batch 2)**: `audio_hash = SHA-256(WAV bytes)` —
+hashea el output completo de ffmpeg incluyendo el header RIFF + cualquier
+sub-chunk de metadata que ffmpeg emita (LIST INFO, JUNK, bext, …).
+
+**Reality detectada en review (R1:M-9)**: ffmpeg cambia los metadata chunks
+entre versiones. Un `docker compose build --no-cache` que sube ffmpeg
+0.4.x → 0.5.x invalida TODO el cache filesystem aunque las muestras PCM
+sean idénticas. Resultado: el cache es ffmpeg-version-dependent.
+
+**Resolución (commit que cierra G6)**: nueva función
+`_sha256_wav_pcm(path)` que parsea el RIFF y hashea SOLO el cuerpo del
+chunk `data`. Fallback al full-file hash si el archivo no es RIFF/WAVE
+(defense para tests + edge cases). El cache key queda estable a través
+de upgrades de ffmpeg.
+
+**Decisión Franco**: PCM puro (default propuesto, confirmado).
+
+**Trade-off documentado**: la función es ~30 LOC más que el hash full-file,
+pero ahorra invalidaciones de cache enteras. La complejidad vive en el
+parser RIFF, que es estándar y bien-documentado.
+
+**Lección**: hashes derivados de archivos generados deben hashear el
+contenido SEMÁNTICO (PCM samples), no la representación física (header +
+chunks). Cualquier metadata-by-side-effect (timestamps, version strings,
+encoder name) hace el hash inestable a través de upgrades.
+
+---
+
+### D-039 🟢 Capa 3 review SD-4: num_speakers se cuenta desde merged segments
+
+**Asumido (implementación Batch 5)**: `num_speakers = len({seg.speaker for seg in merged_segments if seg.speaker})`.
+
+**Ambigüedad detectada en review (R1:M-1)**: si pyannote detecta 3 speakers
+pero uno no recibe palabras de Whisper (e.g., "ah" o "mm" muy corto que
+WhisperX descartó), `num_speakers` queda en 2 — no en 3.
+
+**Decisión Franco**: mantener desde merged segments (default propuesto).
+Razón: matches el mental model del user "los hablantes que veo en la
+transcripción", no el conteo interno de pyannote.
+
+**Implicación**: si un futuro requirement pide "número real de speakers
+detectados por pyannote" (e.g., para reporting), agregar un campo
+adicional `metadata.diarized_speakers_count` sin tocar `num_speakers`.
+
+**Acción pendiente**: ninguna — comportamiento actual es el deseado;
+documentación de la ambigüedad cierra el drift.
+
+**Lección**: cuando dos sources of truth divergen ligeramente, decidir
+explícitamente cuál se expone en el contrato público y mantener el
+otro disponible si se necesita downstream.
+
+---
+
+### D-040 🟢 Capa 3 review SD-5: min_speakers se forwardea a pyannote como hint, no se enforce
+
+**Asumido (implementación Batch 4)**: `min_speakers` y `max_speakers` se
+pasan a `pyannote.Pipeline.__call__(...)` como kwargs y respetan lo que
+pyannote devuelva.
+
+**Ambigüedad detectada en review (R1:M-5, R3:M-3)**: si el cliente manda
+`min_speakers=3` y pyannote devuelve solo 1 (porque genuinamente no
+puede encontrar más en el audio), ¿error o aceptar? El spec no especifica.
+
+**Decisión Franco**: forwardear como hint, aceptar lo que pyannote
+devuelva (default propuesto). Razón: forzar el conteo no tiene
+mecanismo confiable; pyannote es la autoridad sobre el audio real.
+
+**Implicación**: el cliente NO debe asumir que `min_speakers=N` garantiza
+N speakers en la salida. Es un hint, no un constraint.
+
+**Acción pendiente**: ninguna en código. Vale la pena documentar este
+contrato en RF-TRX wiki post-merge para que clientes futuros lo sepan
+sin leer drift logs.
+
+**Lección**: hints externos nunca son enforced strict en presencia de
+constraints físicos del input. El contrato debe ser claro sobre hint
+vs requirement.
+
+---
+
+### D-041 🟢 Capa 3 review SD-6: audio silente se cachea (resultado vacío canónico)
+
+**Asumido (implementación Batch 5)**: cuando STT retorna `segments: []`
+(audio puro silencio), el orchestrator persiste un row + cache file con
+`text_content: ""`, `num_speakers: 0`, `metadata.silent_audio: true`.
+
+**Ambigüedad detectada en review (R1:M-6)**: ¿cachear audio silente o
+no? Trade-off:
+- Cachear: el segundo upload del mismo archivo silente se sirve desde
+  cache (~5s ahorrados).
+- No cachear: el cliente puede re-grabar (e.g., arregló el mic) y la
+  segunda corrida re-procesa.
+
+**Decisión Franco**: cachear (default propuesto). Razón: Privacy no
+cambia (el cache sigue siendo per-user, D-027); Performance gana sin
+costo. El cliente que re-grabe va a tener un `audio_hash` distinto
+porque las muestras PCM cambian — el hash del silencio "real" del mic1
+no colisiona con el hash del silencio "real" del mic2.
+
+**Implicación**: la entrada `metadata.silent_audio: true` en el cache
+es informativa pero no afecta el comportamiento del cache hit.
+
+**Acción pendiente**: ninguna — comportamiento implementado matches
+la decisión.
+
+**Lección**: cuando el cache key es derivado del contenido (PCM hash,
+SD-3), las "categorías" del contenido (silente, multi-speaker, etc.)
+pueden cachearse uniformemente sin lógica especial. El hash hace el
+distinguishing.
+
+---
+
+### D-034 🟢 Capa 3 Batch 3: `stt.transcribe` retorna dict canónico, no `list[Segment]`
+
+**Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-plan.md` Task 3.1 RED)**:
+> con modelo mockeado que retorna shape canónico de WhisperX
+> (`{"segments": [...], "language": "es"}`), `transcribe()` retorna
+> `list[Segment]` con `start/end/text/words`.
+
+**Reality (este commit, `f31253e`)**: el wrapper retorna el dict
+upstream tal cual (`{"segments": [...], "language": "..."}`). Tirar
+`language` aquí significaría que el orchestrator (Batch 5) tendría que
+hacer una segunda pasada por el audio para detectar idioma — el field
+es parte de la response (`metadata.language`, spec §1.1) y de la fila
+en `transcriptions` (Capa 1, columna `language`).
+
+**Resolución**: mantener el dict shape upstream. Tests de Batch 3
+(`test_stt_transcribe.py`) verifican `out["segments"]` y `out["language"]`,
+no una bare list. El test del plan T3.1 RED dice "list[Segment] con
+start/end/text/words" — interpretado como "los segments ya tienen ese
+shape", no como "transcribe() retorna list".
+
+**Acción pendiente**: ninguna. La frase del plan es ambigua; el código
+y los tests hacen el contrato concreto. Si el orchestrator Batch 5
+quiere acceso bare a la lista, lo hace con `result["segments"]`.
+
+**Lección**: cuando un plan describe shapes de I/O, preferir mostrar el
+ejemplo completo del retorno antes que abreviar a "list[T]". La
+ambigüedad entre "retorna lista" y "tiene una lista adentro" cuesta una
+decisión de diseño que el código termina forzando, y la decisión
+puede ser irreversible (cambiar shape en Batch 5+ obliga a tocar
+orchestrator + API + tests).
+
+---
+
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 22 (de los cuales 10 corresponden al review Capa 2).
+**Total drifts identificados**: 35 (10 Capa 2 review + 2 Capa 3 Batch 1 + 3 operacionales rig + 1 Batch 3 + 1 Batch 4 + 2 Batch 5 + 4 Capa 3 review post-fix SD-3..6).
 
-**Severidad**:
+**Severidad** (post-actualización 2026-05-05 incluyendo Capa 3 review fixes):
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
-- 🟠 HIGH: 5 (D-002, D-004, D-006, D-007, D-009, D-013)
-- 🟡 MEDIUM: 9 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021)
-- 🟢 LOW: 4 (D-012, D-019, D-020, D-022)
+- 🟠 HIGH: 6 (D-002, D-004, D-006, D-007, D-009, D-031, D-032)
+- 🟡 MEDIUM: 13 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033)
+- 🟢 LOW: 13 (D-012, D-013, D-019, D-020, D-022, D-034, D-035, D-036, D-037, D-038, D-039, D-040, D-041)
 
-**Drifts ya cerrados**: 14/22.
+**Drifts ya cerrados**: 30/35.
+
+- **Cerrados en wiki sesión 2026-05-05** (commits `60795ab..00d25ad` en branch `feat/capa3-pipeline`): D-014, D-016, D-017, D-018.
+- **D-013**: confirmado como falso drift (wiki ya correcta) — entrada actualizada.
+- **D-031, D-032**: cerrados en código (commits `6dcacc4` + `d034b51`) durante deployment al rig.
+- **D-038**: cerrado en código (commit `73822e8`) — `_sha256_wav_pcm` parsea RIFF para hash PCM-only.
+- **D-039, D-040, D-041**: comportamiento implementado matches la decisión Franco; entrada documenta + cierra.
+
+**Capa 3 review fixes aplicados** (5 CRITICAL + 9 HIGH + 6 SPEC DRIFTS, 7 commits):
+
+| Group | Items | Commit | Files |
+|---|---|---|---|
+| G1 | CR-1 + CR-2 | `81be5ea` | orchestrator.py + new test_orchestration_lock.py |
+| G2 | CR-3 + CR-4 + H-4 | `8d9ca7a` | normalize.py + main.py + test_main_lifespan_helpers.py |
+| G3 | CR-5 + H-6 + H-7 + H-8 + H-9 | `8c50339` | tests/integration/api/test_transcriptions.py (+7 tests) |
+| G4 | H-1 + H-2 + H-3 + H-5 | `8c8f122` | normalize.py + stt.py + main.py + api/transcriptions.py |
+| G5 | SD-1 + SD-2 | `9ca40ce` | config.py + normalize.py + orchestrator.py + api |
+| G6 | SD-3 + drift entries SD-4..6 | `73822e8` | normalize.py + this drift log + tests |
+| G7 | Drift sync + final push | (this commit) | this drift log |
 
 **Drifts pendientes de cierre (acciones concretas)**:
 
 | ID | Acción | Tipo | Cuándo |
 |----|--------|------|--------|
-| D-010 | `/graphify --update` post-Capa 2 fix | proceso | tras cerrar este fix-cycle |
-| D-013 | RF-AUTH-02: 200→302 + body delegado a /auth/me | wiki | sesión wiki dedicada |
-| D-014 | ADR-015 superseding ADR-014 + 05_modelo_datos | wiki | sesión wiki dedicada |
-| D-016 | RF-AUTH-01 multi-tab note | wiki | sesión wiki dedicada |
-| D-017 | RF-AUTH-08 banner UI bearer estado | wiki | sesión wiki dedicada |
-| D-018 | RF-MCP-00 stub | wiki | sesión wiki dedicada |
-| D-019 | Encryption key rotation versioning | code | post-Capa 6 o auditoría |
-| D-020 | last_used_at throttle 5 min | code | bajo Capa 6 carga real |
-| D-021 | Test sub-app fixture refactor | tests | pre-Capa 6 |
-| D-022 | Callback service extraction | refactor | cuando crezca |
+| D-010 | `/graphify --update` post-Capa 2 + Capa 3 fixes | proceso | tras merge de feat/capa3-pipeline a master |
+| D-019 | Encryption key rotation versioning (key-id prefix) | code | post-Capa 6 o auditoría externa |
+| D-020 | `mcp_bearers.last_used_at` throttle 5 min | code | cuando Capa 6 muestre carga real |
+| D-021 | Test sub-app fixture refactor (sacar `/_test_mcp_*` del prod app) | tests | pre-Capa 6 |
+| D-022 | Callback service extraction (`auth/callback_service.py`) | refactor | cuando el handler vuelva a crecer |
+| D-033 | Documentar Postgres password rotation en deployment runbook | docs | Capa 7 (deployment runbook) |
+| D-026, D-027, D-028 | Wiki edits Capa 3 (REST entry, per-user cache, lazy pyannote) | wiki | post-merge Capa 3 a master |
+| D-040 | Documentar `min_speakers` semántica hint vs requirement en RF-TRX | wiki | post-merge Capa 3 a master |
 
 **Pattern emergente para futuras capas**:
 1. Antes de cerrar specs/ADRs, validar las asunciones físicas (hardware, lib semantics, dialect-specific types) con un experimento mínimo.
@@ -417,3 +934,5 @@ y montar en una mini app con la dependencia `Depends(get_current_user_mcp)`.
 5. **Defaults de seguridad fail-closed; el bypass siempre es explícito (context manager, no flag inline).**
 6. **Reviews multi-agente sin context-poisoning capturan invariantes de seguridad que el implementador deja fail-open por inercia.**
 7. **Drifts de RFs/ADRs descubiertos en review se anotan en este log y se baja una sesión wiki dedicada — no se pisan los specs en caliente.**
+8. **Drifts operacionales del primer deployment (D-031, D-032, D-033) no son atrapables por reviews de código** — solo aparecen al ejecutar `pip install .` (sin `[dev]`) dentro de la imagen y arrancar el container. Considerar smoke test post-build como parte del pipeline CI.
+9. **Validar el contenido actual de wiki/spec antes de listar acciones de drift** — evita entradas falsas como D-013 que quedan listadas como pendientes pero ya estaban resueltas (lección post D-013).
