@@ -20,6 +20,15 @@ Error taxonomy:
 The two helpers ``_run_ffmpeg_normalize`` and ``_probe_duration_seconds``
 are intentionally module-level so unit tests can patch them out and exercise
 the validation + hashing logic without ffmpeg installed.
+
+Capa 3 review CR-3:
+- Magic-byte check uses bounded ``open() + read(64)`` instead of
+  ``read_bytes()[:64]`` (which loads the entire file into RAM just to
+  slice 64 bytes — a 500 MB upload triggered a 500 MB allocation per
+  request).
+- SHA-256 is computed via a chunked stream (64 KB blocks) instead of
+  loading the full WAV into RAM. A 2 h normalized WAV is ~230 MB; the
+  chunked path keeps the working set bounded regardless of duration.
 """
 from __future__ import annotations
 
@@ -30,6 +39,36 @@ from pathlib import Path
 
 # Whitelist (extension lowercase without leading dot).
 _ALLOWED_EXTENSIONS = frozenset({"mp3", "mp4", "m4a", "wav", "flac"})
+
+# CR-3: bounded read for magic-byte check + chunk size for streaming SHA-256.
+_MAGIC_HEAD_BYTES = 64
+_SHA256_CHUNK_BYTES = 64 * 1024  # 64 KB — tuned for filesystem block alignment
+
+
+def _read_magic_head(path: Path) -> bytes:
+    """Read at most ``_MAGIC_HEAD_BYTES`` from the start of ``path``.
+
+    CR-3: previously ``path.read_bytes()[:64]`` materialized the WHOLE file
+    in memory (a 500 MB mp4 upload triggered a 500 MB allocation per
+    validation request). The bounded ``read(N)`` keeps RAM usage at ~64
+    bytes regardless of file size.
+    """
+    with path.open("rb") as fp:
+        return fp.read(_MAGIC_HEAD_BYTES)
+
+
+def _sha256_file(path: Path) -> str:
+    """Stream-hash ``path`` in 64 KB chunks; return the hex digest.
+
+    CR-3: previously ``hashlib.sha256(path.read_bytes()).hexdigest()`` held
+    the entire file in RAM. For a 2 h WAV (~230 MB) that's an avoidable
+    spike; the chunked variant keeps working set bounded.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as fp:
+        while chunk := fp.read(_SHA256_CHUNK_BYTES):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 class AudioFormatInvalid(Exception):
@@ -141,7 +180,8 @@ def normalize_audio(src: Path, output_dir: Path) -> tuple[Path, str, float]:
             f"extensión .{ext} no soportada; soportadas: mp4, mp3, m4a, wav, flac"
         )
 
-    head = src.read_bytes()[:64] if src.is_file() else b""
+    # CR-3: bounded read instead of read_bytes()[:64] which loaded whole file.
+    head = _read_magic_head(src) if src.is_file() else b""
     if not _magic_matches(head, ext):
         raise AudioFormatInvalid(
             f"el archivo declara extensión .{ext} pero su contenido no lo es"
@@ -166,7 +206,8 @@ def normalize_audio(src: Path, output_dir: Path) -> tuple[Path, str, float]:
             f"ffmpeg failed (rc={exc.returncode}): {stderr.strip() or 'no stderr'}"
         ) from exc
 
-    audio_hash = hashlib.sha256(out_path.read_bytes()).hexdigest()
+    # CR-3: streaming SHA-256 instead of read_bytes() (avoids loading full WAV).
+    audio_hash = _sha256_file(out_path)
 
     try:
         duration = _probe_duration_seconds(out_path)

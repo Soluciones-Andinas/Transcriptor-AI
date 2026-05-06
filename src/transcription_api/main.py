@@ -15,6 +15,7 @@ This module never calls `logging.basicConfig` to avoid silent override.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -49,14 +50,23 @@ async def lifespan(app: FastAPI):
         settings.compute_type,
     )
 
-    # DATA_DIR/{models,cache} (RF-CACHE-01 step 2).
+    # DATA_DIR/{models,cache,uploads} (RF-CACHE-01 step 2 + H-4 startup).
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     settings.cache_dir.mkdir(parents=True, exist_ok=True)
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     logger.info(
-        "data_dirs_ready models_dir=%s cache_dir=%s",
+        "data_dirs_ready models_dir=%s cache_dir=%s uploads_dir=%s",
         settings.models_dir,
         settings.cache_dir,
+        settings.uploads_dir,
     )
+
+    # H-4: purge orphan uploads from a previous crashed run. A fresh
+    # process has no in-flight requests by definition, so EVERY file in
+    # uploads_dir is a leftover that the API endpoint's cleanup-finally
+    # never reached (container kill -9, OOM, GPU panic, etc.). Best-effort
+    # — failures are logged, never abort startup.
+    _purge_orphan_uploads()
 
     # Capa 1 — bind the engine to app.state. Lazy import so tests can swap
     # `transcription_api.db.session.engine` before lifespan runs. Bind FIRST,
@@ -169,6 +179,15 @@ async def lifespan(app: FastAPI):
             logger.info("db_engine_disposed")
         except Exception:
             logger.error("db_engine_dispose_failed error_id=DB_DISPOSE_FAILED", exc_info=True)
+
+        # CR-4: explicit model cleanup. delattr alone releases the Python
+        # reference but tensors hold CUDA-native memory that the torch
+        # allocator caches by default; without explicit empty_cache + GC,
+        # VRAM is not returned to the driver between LifespanManager
+        # cycles in tests, and a long-running container that re-loads
+        # models (future feature) would slowly leak.
+        _release_models(app)
+
         # Defensive cleanup so back-to-back LifespanManager(app) entries in
         # the same test run don't inherit prior state (mirrors D-015 lesson).
         for attr in (
@@ -219,6 +238,81 @@ async def _cleanup_loop() -> None:
             logger.exception(
                 "cache_cleanup_iteration_failed error_id=CACHE_CLEANUP_LOOP_ERROR"
             )
+
+
+def _purge_orphan_uploads() -> None:
+    """Delete every file in ``settings.uploads_dir`` (H-4 startup).
+
+    A fresh process has no in-flight uploads by definition, so any file
+    present in uploads_dir is a leftover from a previous crashed run
+    (container kill -9, OOM, GPU panic, ASGI shutdown that beat the
+    endpoint's cleanup-finally). Best-effort: failures are logged but
+    never abort startup. The TTL-based cleanup_loop only walks
+    ``cache_dir``; uploads need this one-shot startup pass.
+    """
+    uploads_dir = settings.uploads_dir
+    if not uploads_dir.is_dir():
+        return
+    purged = 0
+    for entry in uploads_dir.iterdir():
+        if not entry.is_file():
+            continue
+        try:
+            entry.unlink()
+            purged += 1
+        except OSError:
+            logger.warning(
+                "upload_orphan_unlink_failed path=%s error_id=UPLOAD_ORPHAN_LEAK",
+                entry,
+                exc_info=True,
+            )
+    if purged:
+        logger.info("upload_orphans_purged count=%d", purged)
+
+
+def _release_models(app: FastAPI) -> None:
+    """Drop CUDA-bound model references and force VRAM release (CR-4).
+
+    ``delattr(app.state, "whisper_model")`` would release the Python
+    reference but the torch allocator caches freed blocks for reuse; on
+    a single-process container that exits anyway the OS reclaims, but
+    inside test runs LifespanManager spins app up + down many times and
+    the cache accumulates. ``torch.cuda.empty_cache()`` returns those
+    cached blocks to the driver. ``gc.collect()`` forces immediate
+    finalization of tensor wrappers so the empty_cache call sees them.
+
+    Best-effort: torch may not be installed (Capa 1+2 deployments) and
+    CUDA may not be available — both cases swallow ImportError /
+    AttributeError and continue.
+    """
+    # Drop strong references first so GC can reclaim the tensors.
+    for attr in ("whisper_model", "pyannote_pipeline"):
+        if getattr(app.state, attr, None) is not None:
+            try:
+                setattr(app.state, attr, None)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "model_attr_clear_failed attr=%s error_id=MODEL_RELEASE_FAILED",
+                    attr,
+                    exc_info=True,
+                )
+
+    # Force GC so any lingering tensor wrappers run their __del__ and
+    # release the underlying CUDA memory back to torch's allocator.
+    gc.collect()
+
+    # Return cached CUDA blocks to the driver. Optional dependency: if
+    # torch is not installed (Capa 1+2 image) or CUDA is unavailable,
+    # this is a no-op.
+    try:
+        import torch  # type: ignore[import-not-found]
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("cuda_empty_cache_done")
+    except (ImportError, AttributeError):
+        # No torch, or torch.cuda missing on a CPU-only build — no-op.
+        pass
 
 
 app = FastAPI(
