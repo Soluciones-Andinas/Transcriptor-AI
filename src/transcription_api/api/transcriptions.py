@@ -69,6 +69,20 @@ def _serialize_for_json(value: Any) -> Any:
     return value
 
 
+def _audio_too_large_response(max_mb: int) -> JSONResponse:
+    """Build the 413 response for AC-5 violations."""
+    return JSONResponse(
+        status_code=413,
+        content={
+            "detail": {
+                "error_code": "AUDIO_TOO_LARGE",
+                "reason": f"upload exceeds {max_mb} MB",
+                "max_mb": max_mb,
+            }
+        },
+    )
+
+
 @router.post("/transcriptions")
 async def post_transcription(
     request: Request,
@@ -81,6 +95,20 @@ async def post_transcription(
     db: AsyncSession = Depends(get_session),
 ) -> JSONResponse:
     """POST /api/transcriptions — multipart upload + bearer + orchestrate."""
+
+    # AC-5 — Content-Length pre-check. Cheap reject for hostile / large
+    # uploads BEFORE we spend any bytes on disk or invoke orchestrate.
+    # A client that lies about Content-Length still hits the streaming
+    # cap below; the pre-check just shaves the common case.
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    content_length_header = request.headers.get("content-length")
+    if content_length_header is not None:
+        try:
+            declared = int(content_length_header)
+        except ValueError:
+            declared = None  # malformed header; fall through to streaming cap
+        if declared is not None and declared > max_bytes:
+            return _audio_too_large_response(settings.max_upload_mb)
 
     # Save raw upload to settings.uploads_dir.
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +125,13 @@ async def post_transcription(
                 if not chunk:
                     break
                 bytes_written += len(chunk)
+                # AC-5 streaming cap: clients that lied (or omitted)
+                # Content-Length still get caught here. Cleanup partial
+                # write and short-circuit.
+                if bytes_written > max_bytes:
+                    fh.close()
+                    raw_path.unlink(missing_ok=True)
+                    return _audio_too_large_response(settings.max_upload_mb)
                 fh.write(chunk)
     except Exception:
         raw_path.unlink(missing_ok=True)
