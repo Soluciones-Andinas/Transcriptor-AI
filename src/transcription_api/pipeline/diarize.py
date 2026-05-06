@@ -57,10 +57,23 @@ def _pyannote_from_pretrained(model_id: str, hf_token: str) -> Any:
 
     Imported inside the function so the module is importable on CPU-only
     machines without the `[pipeline]` extras (mirrors `stt._whisperx_load_model`).
+
+    Capa 3 review post-rig: pyannote.audio 4.x renamed the auth kwarg from
+    ``use_auth_token=`` (3.x) to ``token=`` (HF Hub convention). Try the
+    new signature first; fall back to the legacy one if the installed
+    pyannote happens to be 3.x. The fallback is forward-compat and keeps
+    the function robust against pip resolving either major version.
     """
     from pyannote.audio import Pipeline
 
-    return Pipeline.from_pretrained(model_id, use_auth_token=hf_token)
+    try:
+        return Pipeline.from_pretrained(model_id, token=hf_token)
+    except TypeError as exc:
+        # Only retry on the specific "unexpected keyword argument 'token'"
+        # case; any other TypeError (e.g., wrong model id type) propagates.
+        if "token" not in str(exc):
+            raise
+        return Pipeline.from_pretrained(model_id, use_auth_token=hf_token)
 
 
 def load_pyannote_pipeline(

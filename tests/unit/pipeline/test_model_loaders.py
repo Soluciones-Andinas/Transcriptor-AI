@@ -230,3 +230,95 @@ def test_load_pyannote_returns_pipeline_on_success():
         m.assert_called_once_with(
             "pyannote/speaker-diarization-3.1", "hf_valid_token"
         )
+
+
+# ---------------------------------------------------------------------------
+# Capa 3 review post-rig — pyannote.audio kwarg API change.
+# These tests inject a fake `pyannote.audio` module into sys.modules so
+# they run without `[pipeline]` extras installed (CPU dev box).
+# ---------------------------------------------------------------------------
+def _install_fake_pyannote(monkeypatch, mock_from_pretrained):
+    """Wire a fake `pyannote.audio.Pipeline.from_pretrained` into sys.modules.
+
+    Returns nothing; the patch is undone when monkeypatch tears down.
+    """
+    import sys
+    import types
+
+    fake_pipeline_cls = MagicMock()
+    fake_pipeline_cls.from_pretrained = mock_from_pretrained
+
+    fake_audio_mod = types.ModuleType("pyannote.audio")
+    fake_audio_mod.Pipeline = fake_pipeline_cls  # type: ignore[attr-defined]
+
+    fake_pyannote_mod = types.ModuleType("pyannote")
+    fake_pyannote_mod.audio = fake_audio_mod  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "pyannote", fake_pyannote_mod)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", fake_audio_mod)
+
+
+def test_pyannote_from_pretrained_uses_token_kwarg_first(monkeypatch):
+    """
+    Spec: SPEC-capa3-pipeline-v1
+    Criterion: post-rig fix — pyannote.audio 4.x renamed `use_auth_token=`
+    to `token=`. The wrapper MUST try `token=` first so deployments
+    against the latest pyannote work without a TypeError.
+    """
+    fake = MagicMock(name="pyannote_pipeline_instance")
+    mock_from_pretrained = MagicMock(return_value=fake)
+    _install_fake_pyannote(monkeypatch, mock_from_pretrained)
+
+    from transcription_api.pipeline.diarize import _pyannote_from_pretrained
+
+    result = _pyannote_from_pretrained("model_id", "hf_token_value")
+
+    assert result is fake
+    mock_from_pretrained.assert_called_once_with(
+        "model_id", token="hf_token_value"
+    )
+
+
+def test_pyannote_from_pretrained_falls_back_to_use_auth_token(monkeypatch):
+    """Post-rig fix — if the installed pyannote rejects ``token=`` (3.x),
+    the wrapper falls back to the legacy ``use_auth_token=`` kwarg so
+    older pyannote installations keep working."""
+    fake = MagicMock(name="pyannote_pipeline_legacy")
+
+    def fake_from_pretrained(model_id, **kwargs):
+        if "token" in kwargs and "use_auth_token" not in kwargs:
+            raise TypeError(
+                "Pipeline.from_pretrained() got an unexpected keyword argument 'token'"
+            )
+        if "use_auth_token" in kwargs:
+            return fake
+        raise AssertionError(f"unexpected kwargs: {kwargs}")
+
+    mock_from_pretrained = MagicMock(side_effect=fake_from_pretrained)
+    _install_fake_pyannote(monkeypatch, mock_from_pretrained)
+
+    from transcription_api.pipeline.diarize import _pyannote_from_pretrained
+
+    result = _pyannote_from_pretrained("model_id", "hf_token_value")
+
+    assert result is fake
+    # Two calls: first with token=, second with use_auth_token=.
+    assert mock_from_pretrained.call_count == 2
+    assert mock_from_pretrained.call_args_list[0].kwargs == {"token": "hf_token_value"}
+    assert mock_from_pretrained.call_args_list[1].kwargs == {
+        "use_auth_token": "hf_token_value"
+    }
+
+
+def test_pyannote_from_pretrained_propagates_unrelated_typeerror(monkeypatch):
+    """A TypeError that is NOT about the token kwarg must propagate as-is
+    so a real bug isn't silently swallowed by the fallback path."""
+    mock_from_pretrained = MagicMock(
+        side_effect=TypeError("model_id must be a string")
+    )
+    _install_fake_pyannote(monkeypatch, mock_from_pretrained)
+
+    from transcription_api.pipeline.diarize import _pyannote_from_pretrained
+
+    with pytest.raises(TypeError, match="model_id must be a string"):
+        _pyannote_from_pretrained(123, "hf_token_value")  # type: ignore[arg-type]
