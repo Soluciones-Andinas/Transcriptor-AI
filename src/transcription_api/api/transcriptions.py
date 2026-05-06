@@ -84,6 +84,41 @@ def _audio_too_large_response(max_mb: int) -> JSONResponse:
     )
 
 
+def _models_loaded_or_503(request: Request) -> JSONResponse | None:
+    """AC-15 short-circuit: 503 MODELS_NOT_LOADED if either model is not ready.
+
+    Reads ``app.state.{whisper,pyannote}_status`` (set by the lifespan
+    after model load attempts). On error, surfaces ``app.state.*_detail``
+    in the response body so the operator/client knows which HF condition
+    or CUDA failure triggered the degraded state. Returns ``None`` when
+    both models are ``"ready"`` so the caller can proceed.
+    """
+    state = request.app.state
+    whisper = getattr(state, "whisper_status", "loading")
+    pyannote = getattr(state, "pyannote_status", "loading")
+    if whisper == "ready" and pyannote == "ready":
+        return None
+
+    if whisper != "ready":
+        which = "whisper"
+        detail = getattr(state, "whisper_detail", None)
+    else:
+        which = "pyannote"
+        detail = getattr(state, "pyannote_detail", None)
+
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "error_code": "MODELS_NOT_LOADED",
+                "reason": f"{which} model is not ready; service is starting or degraded",
+                "detail": detail,
+            }
+        },
+        headers={"Retry-After": "30"},
+    )
+
+
 @router.post("/transcriptions")
 async def post_transcription(
     request: Request,
@@ -96,6 +131,12 @@ async def post_transcription(
     db: AsyncSession = Depends(get_session),
 ) -> JSONResponse:
     """POST /api/transcriptions — multipart upload + bearer + orchestrate."""
+
+    # AC-15 — short-circuit BEFORE accepting the upload if either model
+    # failed to load. Saves the network round-trip on a degraded service.
+    not_ready = _models_loaded_or_503(request)
+    if not_ready is not None:
+        return not_ready
 
     # AC-5 — Content-Length pre-check. Cheap reject for hostile / large
     # uploads BEFORE we spend any bytes on disk or invoke orchestrate.
