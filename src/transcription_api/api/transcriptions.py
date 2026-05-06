@@ -36,12 +36,13 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth.dependencies import get_current_user_mcp
 from ..config import settings
 from ..db import get_session
-from ..db.models import User
+from ..db.models import Transcription, User
 from ..pipeline.cache import CacheStore
 from ..pipeline.diarize import PipelineDiarizeError
 from ..pipeline.normalize import AudioFormatInvalid, PipelineNormalizeError
@@ -261,3 +262,66 @@ async def post_transcription(
             logger.warning(
                 "raw_upload_cleanup_failed path=%s", raw_path, exc_info=True
             )
+
+
+def _row_to_response(row: Transcription) -> dict[str, Any]:
+    """Transcription row -> POST-equivalent response dict.
+
+    Matches the shape returned by ``orchestrate``. The JSONB column
+    ``segments`` was persisted as ``{"segments": [...]}`` (matches the
+    factory pattern); we unwrap the list back so the API response is
+    a flat array, identical to what POST returned.
+    """
+    segments_blob = row.segments or {}
+    segments = (
+        segments_blob.get("segments", [])
+        if isinstance(segments_blob, dict)
+        else []
+    )
+    return {
+        "transcription_id": row.id,
+        "audio_hash": row.audio_hash,
+        "language": row.language,
+        "duration_seconds": float(row.duration_seconds),
+        "num_speakers": row.num_speakers,
+        "text_content": row.text_content,
+        "segments": segments,
+        "metadata": row.extra_metadata,
+    }
+
+
+@router.get("/transcriptions/{transcription_id}")
+async def get_transcription(
+    transcription_id: UUID,
+    user: User = Depends(get_current_user_mcp),
+    db: AsyncSession = Depends(get_session),
+) -> JSONResponse:
+    """GET /api/transcriptions/{id} — owner-scoped via the listener.
+
+    The ADR-014/015 listener AND-injects ``WHERE user_id = X`` because
+    ``get_current_user_mcp`` armed ``db.info["user_id"] = current_user.id``.
+    A row owned by another user is filtered out and ``scalar_one_or_none``
+    returns ``None``; we 404 with the SAME response shape as a fully-
+    nonexistent id (AC-8 — no existence leak).
+    """
+    row = (
+        await db.execute(
+            select(Transcription).where(Transcription.id == transcription_id)
+        )
+    ).scalar_one_or_none()
+
+    if row is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": {
+                    "error_code": "TRANSCRIPTION_NOT_FOUND",
+                    "reason": "transcription not found",
+                }
+            },
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content=_serialize_for_json(_row_to_response(row)),
+    )
