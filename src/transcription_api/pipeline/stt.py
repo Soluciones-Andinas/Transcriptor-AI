@@ -38,8 +38,56 @@ def _whisperx_load_model(
     return whisperx.load_model(model_size, device=device, compute_type=compute_type)
 
 
+# H-5: typed Whisper load failures.
+# Stable detail discriminators surfaced via ``app.state.whisper_detail``
+# and ultimately in the 503 ``MODELS_NOT_LOADED`` response body. Mirrors
+# the pyannote pattern (``DETAIL_HF_TOKEN_MISSING`` etc.) so the operator
+# can distinguish recoverable causes (driver issue, model not cached)
+# from configuration mistakes.
+DETAIL_LOAD_CUDA_UNAVAILABLE = "cuda_unavailable"
+DETAIL_LOAD_OOM = "cuda_oom_at_load"
+DETAIL_LOAD_MODEL_NOT_FOUND = "model_not_found"
+DETAIL_LOAD_COMPUTE_TYPE_UNSUPPORTED = "compute_type_unsupported"
+DETAIL_LOAD_UNKNOWN = "unknown"
+
+
+class WhisperLoadError(Exception):
+    """Raised by ``load_whisper_model`` with a typed detail discriminator.
+
+    The lifespan catches this specifically to surface ``exc.detail`` via
+    /health. Distinct from ``GPUError`` (which fires at INFERENCE time).
+    """
+
+    def __init__(self, detail: str, message: str = "") -> None:
+        self.detail = detail
+        super().__init__(message or detail)
+
+
+def _classify_load_failure(exc: BaseException) -> str:
+    """Classify a heterogeneous WhisperX/CUDA load failure into a stable detail.
+
+    Pattern-match the exception message because the upstream type hierarchy
+    is heterogeneous (RuntimeError, OSError, custom torch errors, etc.).
+    """
+    msg = str(exc).lower()
+    if "out of memory" in msg or "cuda oom" in msg:
+        return DETAIL_LOAD_OOM
+    if "no cuda" in msg or "cuda is not available" in msg or "cuda unavailable" in msg:
+        return DETAIL_LOAD_CUDA_UNAVAILABLE
+    if (
+        "not found" in msg
+        or "no such file" in msg
+        or "missing" in msg
+        or "404" in msg
+    ):
+        return DETAIL_LOAD_MODEL_NOT_FOUND
+    if "compute" in msg and ("unsupported" in msg or "invalid" in msg):
+        return DETAIL_LOAD_COMPUTE_TYPE_UNSUPPORTED
+    return DETAIL_LOAD_UNKNOWN
+
+
 def load_whisper_model(model_size: str, device: str, compute_type: str) -> Any:
-    """Load a WhisperX inference model.
+    """Load a WhisperX inference model, classifying failures into typed details.
 
     Args:
         model_size: faster-whisper model id, e.g. ``large-v3``.
@@ -51,14 +99,22 @@ def load_whisper_model(model_size: str, device: str, compute_type: str) -> Any:
         The whisperx model handle. Caller stores it on ``app.state.whisper_model``.
 
     Raises:
-        Whatever whisperx raises (CUDA driver missing, OOM at load, etc.).
-        The lifespan catches generically and records the message in
-        ``app.state.whisper_detail`` so /health surfaces the failure
-        without aborting the service.
+        WhisperLoadError: with ``detail`` ∈ {``cuda_unavailable``, ``cuda_oom_at_load``,
+            ``model_not_found``, ``compute_type_unsupported``, ``unknown``}.
+            The lifespan catches and records ``exc.detail`` in
+            ``app.state.whisper_detail``; /health surfaces it; POST returns
+            503 MODELS_NOT_LOADED with the detail propagated (H-5).
     """
-    return _whisperx_load_model(
-        model_size, device=device, compute_type=compute_type
-    )
+    try:
+        return _whisperx_load_model(
+            model_size, device=device, compute_type=compute_type
+        )
+    except WhisperLoadError:
+        # Already typed (re-entrancy in tests) — propagate.
+        raise
+    except Exception as exc:
+        detail = _classify_load_failure(exc)
+        raise WhisperLoadError(detail, str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

@@ -113,11 +113,24 @@ def _magic_matches(blob: bytes, ext: str) -> bool:
     return False
 
 
+# H-1: hard timeouts so a hung ffmpeg/ffprobe never blocks the worker
+# thread indefinitely. asyncio.to_thread cannot kill a sync call
+# already in progress; the subprocess timeout is the only mechanism
+# that bounds the work. Numbers chosen well above expected runtimes:
+# - 600s (10min) for normalize: realtime decode of a 1h audio is <2min
+#   on modern CPU, 4060 Ti can do 2h in <5min. 10min is generous tail.
+# - 30s for ffprobe: header read should be sub-second; 30s catches
+#   pathological filesystem stalls without false positives.
+_FFMPEG_TIMEOUT_SECONDS = 600
+_FFPROBE_TIMEOUT_SECONDS = 30
+
+
 def _run_ffmpeg_normalize(src: Path, dst: Path) -> None:
     """Re-encode ``src`` to PCM 16-bit / 16 kHz / mono WAV at ``dst``.
 
     Indirection level so unit tests can patch this out and exercise the
-    surrounding validation + hashing without ffmpeg installed.
+    surrounding validation + hashing without ffmpeg installed. H-1: hard
+    timeout via subprocess.run keyword bounds runaway invocations.
     """
     subprocess.run(  # noqa: S603,S607
         [
@@ -137,6 +150,7 @@ def _run_ffmpeg_normalize(src: Path, dst: Path) -> None:
         ],
         check=True,
         capture_output=True,
+        timeout=_FFMPEG_TIMEOUT_SECONDS,
     )
 
 
@@ -144,6 +158,8 @@ def _probe_duration_seconds(path: Path) -> float:
     """Return the duration of ``path`` in seconds via ffprobe.
 
     Module-level for the same patchability reason as ``_run_ffmpeg_normalize``.
+    H-1: hard timeout — a stalled ffprobe is a filesystem / driver issue
+    and should surface fast as PipelineNormalizeError, not block the loop.
     """
     raw = subprocess.check_output(  # noqa: S603,S607
         [
@@ -156,6 +172,7 @@ def _probe_duration_seconds(path: Path) -> float:
             "default=noprint_wrappers=1:nokey=1",
             str(path),
         ],
+        timeout=_FFPROBE_TIMEOUT_SECONDS,
     )
     return float(raw.decode().strip())
 
@@ -205,6 +222,18 @@ def normalize_audio(src: Path, output_dir: Path) -> tuple[Path, str, float]:
         raise PipelineNormalizeError(
             f"ffmpeg failed (rc={exc.returncode}): {stderr.strip() or 'no stderr'}"
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        # H-1: ffmpeg exceeded the hard subprocess timeout. Best-effort
+        # cleanup of any partial output, then surface as a typed error so
+        # the orchestrator releases the lock + the API maps to 500.
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except OSError:
+                pass
+        raise PipelineNormalizeError(
+            f"ffmpeg exceeded {_FFMPEG_TIMEOUT_SECONDS}s timeout"
+        ) from exc
 
     # CR-3: streaming SHA-256 instead of read_bytes() (avoids loading full WAV).
     audio_hash = _sha256_file(out_path)
@@ -213,5 +242,9 @@ def normalize_audio(src: Path, output_dir: Path) -> tuple[Path, str, float]:
         duration = _probe_duration_seconds(out_path)
     except (subprocess.CalledProcessError, ValueError) as exc:
         raise PipelineNormalizeError(f"ffprobe failed: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise PipelineNormalizeError(
+            f"ffprobe exceeded {_FFPROBE_TIMEOUT_SECONDS}s timeout"
+        ) from exc
 
     return out_path, audio_hash, duration

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -49,6 +50,13 @@ async def lifespan(app: FastAPI):
         settings.default_language,
         settings.compute_type,
     )
+
+    # H-2: the orchestrator's GPU lock is module-level → per-process. Running
+    # multiple workers behind a load balancer breaks AC-6 (a second worker
+    # would NOT see the first worker's lock and could trigger concurrent
+    # GPU jobs, OOM-ing). Detect common multi-worker env vars and refuse
+    # to start so the operator catches the misconfiguration immediately.
+    _enforce_single_worker_or_warn()
 
     # DATA_DIR/{models,cache,uploads} (RF-CACHE-01 step 2 + H-4 startup).
     settings.models_dir.mkdir(parents=True, exist_ok=True)
@@ -106,11 +114,26 @@ async def lifespan(app: FastAPI):
             settings.whisper_device,
             settings.compute_type,
         )
-    except Exception as exc:  # noqa: BLE001
+    except _stt.WhisperLoadError as exc:
+        # H-5: typed detail discriminator surfaces in /health.whisper_detail
+        # and POST 503 body verbatim. Operator distinguishes
+        # cuda_unavailable / cuda_oom_at_load / model_not_found /
+        # compute_type_unsupported / unknown without parsing free text.
         app.state.whisper_status = "error"
-        app.state.whisper_detail = str(exc)
+        app.state.whisper_detail = exc.detail
         logger.warning(
             "whisper_load_failed error_id=WHISPER_LOAD_ERROR detail=%s",
+            exc.detail,
+            exc_info=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Defensive: should be unreachable now that load_whisper_model wraps
+        # all upstream failures in WhisperLoadError. Kept so a bug in the
+        # classifier doesn't crash startup.
+        app.state.whisper_status = "error"
+        app.state.whisper_detail = _stt.DETAIL_LOAD_UNKNOWN
+        logger.warning(
+            "whisper_load_failed_uncategorized error_id=WHISPER_LOAD_ERROR_UNKNOWN exc=%s",
             exc,
             exc_info=True,
         )
@@ -238,6 +261,46 @@ async def _cleanup_loop() -> None:
             logger.exception(
                 "cache_cleanup_iteration_failed error_id=CACHE_CLEANUP_LOOP_ERROR"
             )
+
+
+def _enforce_single_worker_or_warn() -> None:
+    """Warn (loudly) when env signals multiple uvicorn/gunicorn workers (H-2).
+
+    The orchestrator's ``_orchestrator_lock`` is module-level and therefore
+    process-local. With WEB_CONCURRENCY > 1 (or similar), a second worker
+    has its own copy of the lock and would happily start a second GPU job
+    while another worker holds the GPU — guaranteed to OOM the 8 GB rig.
+
+    Detected variables (in priority order):
+    - ``WEB_CONCURRENCY``  — gunicorn/uvicorn workers count
+    - ``UVICORN_WORKERS``  — uvicorn-specific
+    - ``GUNICORN_WORKERS`` — gunicorn-specific
+
+    On detection of >1, log an ERROR with a clear remediation note. We log
+    instead of hard-aborting because some local-dev workflows benignly set
+    these to 2 for unrelated reasons; the operator should see the warning
+    and act. AC-6 is about per-process semantics; documenting the
+    assumption here is the spec-aligned response.
+    """
+    candidates = ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS")
+    for var in candidates:
+        raw = os.environ.get(var)
+        if raw is None:
+            continue
+        try:
+            workers = int(raw)
+        except ValueError:
+            continue
+        if workers > 1:
+            logger.error(
+                "multi_worker_detected error_id=MULTI_WORKER_GPU_LOCK_BROKEN "
+                "var=%s workers=%d remediation=%s",
+                var,
+                workers,
+                "set to 1; the GPU lock is process-local (ADR-005, AC-6)",
+            )
+            return
+    logger.info("single_worker_assumption_validated")
 
 
 def _purge_orphan_uploads() -> None:

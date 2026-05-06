@@ -44,20 +44,77 @@ def test_load_whisper_returns_object_with_transcribe():
         )
 
 
-def test_load_whisper_propagates_runtime_errors():
+def test_load_whisper_classifies_cuda_unavailable_runtime_errors():
     """
     Spec: SPEC-capa3-pipeline-v1
-    Criterion: AC-9 — Given the inner whisperx loader raises (e.g. CUDA driver
-    missing), When load_whisper_model is invoked, Then the original exception
-    propagates so the lifespan can record `app.state.whisper_status = "error"`
-    with the original message as detail.
+    Criterion: AC-9 + H-5 — Given the inner whisperx loader raises with a
+    message that signals CUDA unavailability, When load_whisper_model is
+    invoked, Then the wrapper raises WhisperLoadError with detail
+    `cuda_unavailable` so the lifespan can surface a stable discriminator
+    on `/health.whisper_detail` and the API 503 body (mirrors the pyannote
+    pattern).
+
+    Capa 3 review H-5: previously this test asserted that the raw
+    RuntimeError propagated. The current contract classifies failures
+    into a closed set of detail strings; we assert that here.
     """
-    from transcription_api.pipeline.stt import load_whisper_model
+    from transcription_api.pipeline.stt import (
+        DETAIL_LOAD_CUDA_UNAVAILABLE,
+        WhisperLoadError,
+        load_whisper_model,
+    )
 
     with patch("transcription_api.pipeline.stt._whisperx_load_model") as m:
-        m.side_effect = RuntimeError("CUDA driver not available")
-        with pytest.raises(RuntimeError, match="CUDA driver not available"):
+        m.side_effect = RuntimeError("CUDA driver not available; cuda is not available")
+        with pytest.raises(WhisperLoadError) as exc_info:
             load_whisper_model("large-v3", "cuda", "int8_float16")
+        assert exc_info.value.detail == DETAIL_LOAD_CUDA_UNAVAILABLE
+
+
+def test_load_whisper_classifies_cuda_oom_at_load():
+    """H-5: OOM during load classifies as `cuda_oom_at_load`."""
+    from transcription_api.pipeline.stt import (
+        DETAIL_LOAD_OOM,
+        WhisperLoadError,
+        load_whisper_model,
+    )
+
+    with patch("transcription_api.pipeline.stt._whisperx_load_model") as m:
+        m.side_effect = RuntimeError("CUDA out of memory")
+        with pytest.raises(WhisperLoadError) as exc_info:
+            load_whisper_model("large-v3", "cuda", "int8_float16")
+        assert exc_info.value.detail == DETAIL_LOAD_OOM
+
+
+def test_load_whisper_classifies_model_not_found():
+    """H-5: 404 / not-found / no-such-file → `model_not_found`."""
+    from transcription_api.pipeline.stt import (
+        DETAIL_LOAD_MODEL_NOT_FOUND,
+        WhisperLoadError,
+        load_whisper_model,
+    )
+
+    with patch("transcription_api.pipeline.stt._whisperx_load_model") as m:
+        m.side_effect = OSError("No such file or directory: '/data/models/...'")
+        with pytest.raises(WhisperLoadError) as exc_info:
+            load_whisper_model("large-v3", "cuda", "int8_float16")
+        assert exc_info.value.detail == DETAIL_LOAD_MODEL_NOT_FOUND
+
+
+def test_load_whisper_unknown_error_classifies_as_unknown():
+    """H-5: an exception message that doesn't match any heuristic falls back
+    to the `unknown` discriminator (not silenced or coerced to a sibling)."""
+    from transcription_api.pipeline.stt import (
+        DETAIL_LOAD_UNKNOWN,
+        WhisperLoadError,
+        load_whisper_model,
+    )
+
+    with patch("transcription_api.pipeline.stt._whisperx_load_model") as m:
+        m.side_effect = ValueError("malformed config blob")
+        with pytest.raises(WhisperLoadError) as exc_info:
+            load_whisper_model("large-v3", "cuda", "int8_float16")
+        assert exc_info.value.detail == DETAIL_LOAD_UNKNOWN
 
 
 # ---------------------------------------------------------------------------

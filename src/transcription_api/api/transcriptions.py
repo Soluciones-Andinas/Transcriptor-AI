@@ -84,6 +84,41 @@ def _audio_too_large_response(max_mb: int) -> JSONResponse:
     )
 
 
+def _stripped_500(
+    exc: Exception, error_code: str, *, extra: dict[str, Any] | None = None
+) -> JSONResponse:
+    """500 response with a stable reason + correlation ``error_id`` (H-3).
+
+    Capa 3 review H-3: the prior implementations did
+    ``"reason": str(exc)`` for GPUError / PipelineDiarizeError /
+    PipelineNormalizeError. For ffmpeg / CUDA failures the upstream
+    message routinely contains filesystem paths, driver versions, or
+    binary stderr — leaked verbatim to the user. The spec catalog
+    (§4) says ``"detail": <stripped>``; this helper enforces that.
+
+    The full ``str(exc)`` is logged with the error_id so support can
+    correlate via the operator's stdout. Optional ``extra`` carries
+    typed discriminators (e.g., ``GPUError.detail``) that ARE safe to
+    expose because they come from a closed enum.
+    """
+    error_id = str(uuid.uuid4())
+    logger.error(
+        "%s error_id=%s detail=%s",
+        error_code,
+        error_id,
+        exc,
+        exc_info=True,
+    )
+    body: dict[str, Any] = {
+        "error_code": error_code,
+        "reason": "see error_id in logs",
+        "error_id": error_id,
+    }
+    if extra:
+        body.update(extra)
+    return JSONResponse(status_code=500, content={"detail": body})
+
+
 def _models_loaded_or_503(request: Request) -> JSONResponse | None:
     """AC-15 short-circuit: 503 MODELS_NOT_LOADED if either model is not ready.
 
@@ -229,42 +264,28 @@ async def post_transcription(
         )
 
     except GPUError as exc:
+        # H-3: keep the typed `detail` field (closed enum: oom / runtime)
+        # but DO NOT leak the upstream str(exc) — CUDA error strings
+        # routinely contain filesystem paths and driver versions.
         await db.rollback()
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": {
-                    "error_code": "GPU_ERROR",
-                    "reason": str(exc),
-                }
-            },
-        )
+        return _stripped_500(exc, "GPU_ERROR", extra={"detail": exc.detail})
 
     except PipelineDiarizeError as exc:
+        # H-3: pyannote / Hugging Face errors may leak HF cache paths.
         await db.rollback()
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": {
-                    "error_code": "PIPELINE_DIARIZE_ERROR",
-                    "reason": str(exc),
-                }
-            },
-        )
+        return _stripped_500(exc, "PIPELINE_DIARIZE_ERROR")
 
     except PipelineNormalizeError as exc:
+        # H-3: ffmpeg stderr is the most leaky surface (always contains
+        # the input path, often the user's home directory). Stripped
+        # to the error_id correlation pattern; full message in logs.
         await db.rollback()
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": {
-                    "error_code": "PIPELINE_NORMALIZE_ERROR",
-                    "reason": str(exc),
-                }
-            },
-        )
+        return _stripped_500(exc, "PIPELINE_NORMALIZE_ERROR")
 
     except AudioFormatInvalid as exc:
+        # NOT stripped — the message is already a Spanish-readable
+        # validation reason ("extensión .X no soportada; ..."), no
+        # filesystem leak. The end user benefits from seeing it.
         await db.rollback()
         return JSONResponse(
             status_code=400,
@@ -276,23 +297,10 @@ async def post_transcription(
             },
         )
 
-    except Exception:
-        # Catch-all -> 500 INTERNAL_ERROR with a correlation UUID. The
-        # traceback lives in the logs (NOT in the response body — that
-        # would leak filesystem paths and stack frames).
-        error_id = str(uuid.uuid4())
-        logger.exception("internal_error error_id=%s", error_id)
+    except Exception as exc:
+        # Catch-all -> 500 INTERNAL_ERROR. Same H-3 stripping pattern.
         await db.rollback()
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": {
-                    "error_code": "INTERNAL_ERROR",
-                    "reason": "see error_id in logs",
-                    "error_id": error_id,
-                }
-            },
-        )
+        return _stripped_500(exc, "INTERNAL_ERROR")
 
     finally:
         # Best-effort cleanup of the raw upload (the orchestrator already
