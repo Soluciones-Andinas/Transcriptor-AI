@@ -577,7 +577,7 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 |---|---|---|---|
 | SPEC-capa3 | AC-1 | Pipeline layers (23 unit tests) + orchestrator (4 integration tests, requires_docker) + POST E2E: `test_post_transcription_with_valid_bearer_returns_200` (requires_docker). Full chain closed end-to-end. | [x] |
 | SPEC-capa3 | AC-2 | `test_cache_writes_and_reads_per_user` + `test_cache_returns_none_on_miss` (substrate). End-to-end `test_post_transcription_cache_hit_skips_pipeline` deferred to Batch 6. | [x] (substrate) / [ ] (E2E POST) |
-| SPEC-capa3 | AC-3 | `test_post_transcription_unauthenticated_401` | [ ] |
+| SPEC-capa3 | AC-3 | `test_post_transcription_without_bearer_returns_401` + `test_post_transcription_with_malformed_bearer_returns_401` + `test_get_without_bearer_returns_401` | [x] |
 | SPEC-capa3 | AC-4 | normalize layer: `test_normalize_rejects_extension_outside_whitelist` + `test_normalize_rejects_magic_bytes_mismatch`. API surface: `test_post_rejects_audio_format_invalid_with_400`. | [x] |
 | SPEC-capa3 | AC-5 | `test_post_rejects_oversize_via_content_length_413` (Content-Length pre-check + orchestrate not-called assertion) | [x] |
 | SPEC-capa3 | AC-6 | `test_orchestrator_serializes_two_concurrent_jobs_with_gpu_busy` + `test_orchestrator_lock_released_after_happy_completion` + `test_pipeline_timeout_is_distinct_from_gpu_busy` | [x] |
