@@ -30,6 +30,7 @@ from .config import settings
 from .gpu import AcceleratorInfo, detect_accelerator
 from .pipeline import diarize as _diarize
 from .pipeline import stt as _stt
+from .pipeline.cleanup import purge_expired
 
 logger = logging.getLogger("transcription_api")
 
@@ -137,9 +138,30 @@ async def lifespan(app: FastAPI):
     app.state.pipeline_active_job_id = None
     app.state.pipeline_queue_depth = 0
 
+    # Capa 3 Batch 7 — cleanup loop. Spawns a background task that calls
+    # ``purge_expired`` every ``cache_cleanup_interval_seconds``. Cancelled
+    # in the finally block on shutdown so the loop does not leak across
+    # ASGI restarts (and tests via LifespanManager get a clean tear-down).
+    app.state.cleanup_task = asyncio.create_task(_cleanup_loop())
+    logger.info(
+        "cleanup_task_spawned interval_seconds=%s",
+        settings.cache_cleanup_interval_seconds,
+    )
+
     try:
         yield
     finally:
+        # Cancel the cleanup loop FIRST so it doesn't observe a half-disposed
+        # engine if the dispose step took non-trivial time.
+        cleanup_task = getattr(app.state, "cleanup_task", None)
+        if cleanup_task is not None and not cleanup_task.done():
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("cleanup_task_cancelled")
+
         # ERR-1: dispose must not propagate; if the DB was already down,
         # closing dead connections itself raises. Log + swallow.
         try:
@@ -159,10 +181,44 @@ async def lifespan(app: FastAPI):
             "pipeline_lock_held",
             "pipeline_active_job_id",
             "pipeline_queue_depth",
+            "cleanup_task",
         ):
             if hasattr(app.state, attr):
                 delattr(app.state, attr)
         logger.info("service_stopping")
+
+
+async def _cleanup_loop() -> None:
+    """Background loop that periodically purges expired cache entries.
+
+    Runs ``purge_expired`` in a worker thread (sync IO) so the event loop
+    stays responsive. Cancellation is propagated cleanly: the inner
+    ``await asyncio.sleep`` is the cancellation point and the
+    ``CancelledError`` is allowed to escape so the lifespan teardown can
+    await + handle it.
+
+    A failure inside ``purge_expired`` itself is caught and logged so a
+    transient filesystem error (e.g. a permissions hiccup) does not kill
+    the loop and leave the cache to grow unbounded.
+    """
+    while True:
+        try:
+            await asyncio.sleep(settings.cache_cleanup_interval_seconds)
+        except asyncio.CancelledError:
+            raise
+
+        try:
+            await asyncio.to_thread(
+                purge_expired,
+                settings.cache_dir,
+                settings.cache_ttl_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "cache_cleanup_iteration_failed error_id=CACHE_CLEANUP_LOOP_ERROR"
+            )
 
 
 app = FastAPI(
