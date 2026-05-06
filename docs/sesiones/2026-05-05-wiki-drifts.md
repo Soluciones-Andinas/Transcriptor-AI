@@ -692,6 +692,50 @@ leyendo código.
 
 ---
 
+### D-042 🟠 Capa 3 deployment: pyannote 4.x requiere TRES HF model accepts (no dos)
+
+**Asumido (spec §0.3 + deployment guide)**: aceptar terms en HF para
+`pyannote/speaker-diarization-3.1` y `pyannote/segmentation-3.0`.
+
+**Reality (rig deployment 2026-05-06, primer intento)**: pyannote.audio
+4.x agregó un **tercer modelo gated**, `pyannote/speaker-diarization-community-1`,
+que contiene el PLDA artifact (`xvec_transform.npz`) usado internamente
+por la pipeline `speaker-diarization-3.1`. Sin terms accept, el load
+falla con `huggingface_hub.errors.GatedRepoError: 403... Cannot access
+gated repo`.
+
+Cadena de causalidad observada en el rig:
+
+1. Operator acepta terms en los dos modelos del spec.
+2. Build pasa (los modelos se descargan lazy en runtime).
+3. Lifespan corre: Whisper carga ✓, pyannote carga → `Pipeline.from_pretrained`
+   triggea descarga del PLDA del tercer modelo → `GatedRepoError` 403.
+4. H-5 classifier match `"gated" in str(exc) or "403" in str(exc)` →
+   `DETAIL_TERMS_NOT_ACCEPTED`. /health surfacea el detail.
+5. Operator visita https://huggingface.co/pyannote/speaker-diarization-community-1,
+   acepta terms. Restart. Carga OK.
+
+**Por qué no lo atrapamos en review**: el modelo `community-1` es
+transitive dependency interna de pyannote 4.x. No aparece en docs
+top-level del modelo `speaker-diarization-3.1`. Solo se descubre al
+ejecutar `Pipeline.from_pretrained` contra HF en runtime.
+
+**Resolución (2026-05-06)**: documentar el tercer model accept como
+parte del deployment guide. Sin código a cambiar — el classifier H-5
+ya surfacea bien el error, el operator solo necesita saber qué hacer
+cuando lo ve.
+
+**Acción pendiente sobre wiki/spec**: agregar a `wiki/RF/RF-TRX.md`
+prerequisitos sección "HF model accepts" listando los TRES modelos
+(no solo dos). Idem en el deployment runbook futuro (D-033).
+
+**Lección**: las dependencias gated transitivas son invisibles hasta
+runtime contra HF real. Mitigación: smoke test contra HF en CI o
+pre-deploy script que valide el token tiene acceso a los N modelos
+listados, en vez de descubrirlo en producción.
+
+---
+
 ### D-038 🟢 Capa 3 review SD-3: audio_hash es del PCM puro, no del WAV completo
 
 **Asumido (implementación inicial Batch 2)**: `audio_hash = SHA-256(WAV bytes)` —
