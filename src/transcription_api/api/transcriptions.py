@@ -45,7 +45,11 @@ from ..db import get_session
 from ..db.models import Transcription, User
 from ..pipeline.cache import CacheStore
 from ..pipeline.diarize import PipelineDiarizeError
-from ..pipeline.normalize import AudioFormatInvalid, PipelineNormalizeError
+from ..pipeline.normalize import (
+    AudioFormatInvalid,
+    AudioTooLong,
+    PipelineNormalizeError,
+)
 from ..pipeline.orchestrator import GPUBusy, PipelineTimeout, orchestrate
 from ..pipeline.stt import GPUError
 
@@ -293,6 +297,28 @@ async def post_transcription(
                 "detail": {
                     "error_code": "AUDIO_FORMAT_INVALID",
                     "reason": str(exc),
+                }
+            },
+        )
+
+    except AudioTooLong as exc:
+        # SD-1: duration cap (MAX_AUDIO_DURATION_SECONDS, spec §7) —
+        # surfaced as the same 413 AUDIO_TOO_LARGE category as the byte
+        # cap (AC-5). The body distinguishes the cause via the optional
+        # `duration_seconds` / `max_seconds` fields so the client can
+        # render an actionable error message.
+        await db.rollback()
+        return JSONResponse(
+            status_code=413,
+            content={
+                "detail": {
+                    "error_code": "AUDIO_TOO_LARGE",
+                    "reason": (
+                        f"audio duration {exc.duration_seconds:.1f}s exceeds "
+                        f"{exc.max_seconds}s cap"
+                    ),
+                    "duration_seconds": exc.duration_seconds,
+                    "max_seconds": exc.max_seconds,
                 }
             },
         )

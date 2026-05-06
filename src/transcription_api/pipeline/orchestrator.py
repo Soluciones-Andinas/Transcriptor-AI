@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -399,8 +400,13 @@ async def orchestrate(
             _orchestrator_lock.release()
         raise GPUBusy(retry_after=retry) from exc
 
+    # SD-2 (spec §1.1): record processing_seconds so the response payload
+    # reports how long the pipeline actually took. Measured around the
+    # inner pipeline call (after the lock is acquired) so the value is
+    # the work time the user paid for, not the queue wait.
+    pipeline_started = time.perf_counter()
     try:
-        return await asyncio.wait_for(
+        result = await asyncio.wait_for(
             _run_pipeline(
                 user_id=user_id,
                 db=db,
@@ -418,6 +424,11 @@ async def orchestrate(
             ),
             timeout=pipe_to,
         )
+        elapsed = time.perf_counter() - pipeline_started
+        # _run_pipeline always sets metadata; defensive setdefault keeps
+        # the augmentation safe if a future refactor returns a slimmer dict.
+        result.setdefault("metadata", {})["processing_seconds"] = round(elapsed, 2)
+        return result
     except asyncio.TimeoutError as exc:
         raise PipelineTimeout(timeout_seconds=pipe_to) from exc
     finally:

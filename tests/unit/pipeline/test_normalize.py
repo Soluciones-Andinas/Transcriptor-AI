@@ -205,3 +205,57 @@ def test_normalize_raises_pipeline_error_on_ffmpeg_failure(tmp_path: Path):
     )
     with pytest.raises(PipelineNormalizeError):
         normalize_audio(bogus, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# SD-1 — MAX_AUDIO_DURATION_SECONDS hard cap (spec §7).
+# ---------------------------------------------------------------------------
+def test_normalize_raises_audio_too_long_when_duration_exceeds_cap(
+    tmp_path: Path, monkeypatch
+):
+    """
+    Spec: SPEC-capa3-pipeline-v1
+    Criterion: SD-1 — Given a normalized audio whose ffprobe duration
+    exceeds settings.max_audio_duration_seconds, When normalize_audio
+    is invoked, Then AudioTooLong is raised with the actual duration
+    and the configured cap. The API maps this to HTTP 413
+    AUDIO_TOO_LARGE in api/transcriptions.py.
+    """
+    from transcription_api.config import settings
+    from transcription_api.pipeline import normalize as norm_mod
+    from transcription_api.pipeline.normalize import AudioTooLong, normalize_audio
+
+    src = _write_with_ext(tmp_path, "long.mp3", b"ID3" + b"\xab" * 32)
+
+    def fake_ffmpeg(_src, dst):
+        Path(dst).write_bytes(b"RIFF\x24\x00\x00\x00WAVE" + b"\x00" * 32)
+
+    monkeypatch.setattr(norm_mod, "_run_ffmpeg_normalize", fake_ffmpeg)
+    # Force ffprobe to report a duration above the cap.
+    monkeypatch.setattr(norm_mod, "_probe_duration_seconds", lambda _p: 9999.0)
+    monkeypatch.setattr(settings, "max_audio_duration_seconds", 7200)
+
+    with pytest.raises(AudioTooLong) as exc_info:
+        normalize_audio(src, tmp_path)
+    assert exc_info.value.duration_seconds == 9999.0
+    assert exc_info.value.max_seconds == 7200
+
+
+def test_normalize_accepts_duration_at_cap(tmp_path: Path, monkeypatch):
+    """SD-1: a duration exactly at the cap (≤) is accepted, not rejected."""
+    from transcription_api.config import settings
+    from transcription_api.pipeline import normalize as norm_mod
+    from transcription_api.pipeline.normalize import normalize_audio
+
+    src = _write_with_ext(tmp_path, "edge.mp3", b"ID3" + b"\xab" * 32)
+
+    def fake_ffmpeg(_src, dst):
+        Path(dst).write_bytes(b"RIFF\x24\x00\x00\x00WAVE" + b"\x00" * 32)
+
+    monkeypatch.setattr(norm_mod, "_run_ffmpeg_normalize", fake_ffmpeg)
+    monkeypatch.setattr(norm_mod, "_probe_duration_seconds", lambda _p: 7200.0)
+    monkeypatch.setattr(settings, "max_audio_duration_seconds", 7200)
+
+    out_path, _hash, duration = normalize_audio(src, tmp_path)
+    assert duration == pytest.approx(7200.0)
+    assert out_path.exists()

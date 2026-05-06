@@ -88,6 +88,23 @@ class PipelineNormalizeError(Exception):
     """
 
 
+class AudioTooLong(Exception):
+    """Raised when the input duration exceeds ``MAX_AUDIO_DURATION_SECONDS``.
+
+    SD-1 (spec §7): bound on the pipeline cost. Enforced AFTER ffprobe
+    measures the duration (file size doesn't determine duration — bitrate
+    varies by codec). The API maps this to HTTP 413 ``AUDIO_TOO_LARGE``
+    with ``duration_seconds`` and ``max_seconds`` in the response body.
+    """
+
+    def __init__(self, duration_seconds: float, max_seconds: int) -> None:
+        self.duration_seconds = duration_seconds
+        self.max_seconds = max_seconds
+        super().__init__(
+            f"audio duration {duration_seconds:.1f}s exceeds {max_seconds}s cap"
+        )
+
+
 def _magic_matches(blob: bytes, ext: str) -> bool:
     """Return True if the first bytes of ``blob`` look like ``ext``.
 
@@ -246,5 +263,20 @@ def normalize_audio(src: Path, output_dir: Path) -> tuple[Path, str, float]:
         raise PipelineNormalizeError(
             f"ffprobe exceeded {_FFPROBE_TIMEOUT_SECONDS}s timeout"
         ) from exc
+
+    # SD-1: enforce duration cap. We do this AFTER probe (not before
+    # ffmpeg) because file size doesn't reliably bound duration —
+    # bitrate varies wildly by codec. The cost of normalizing first
+    # then rejecting is bounded by _FFMPEG_TIMEOUT_SECONDS.
+    from ..config import settings as _settings  # avoid circular import at module load
+
+    max_secs = _settings.max_audio_duration_seconds
+    if duration > max_secs:
+        # Cleanup the normalized WAV: we won't be using it.
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise AudioTooLong(duration_seconds=duration, max_seconds=max_secs)
 
     return out_path, audio_hash, duration
