@@ -584,11 +584,11 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 | SPEC-capa3 | AC-7 | STT mapping (5 tests) + orchestrator lock-release (3 tests) + POST 500 mapping: `test_post_maps_gpu_error_to_500` + `test_post_maps_pipeline_normalize_error_to_500` + `test_post_maps_pipeline_diarize_error_to_500` + `test_post_maps_unexpected_exception_to_500_with_error_id`. | [x] |
 | SPEC-capa3 | AC-8 | `test_get_cross_user_returns_404_no_existence_leak` + `test_get_nonexistent_id_returns_404_same_shape` (no-existence-leak invariant) | [x] |
 | SPEC-capa3 | AC-9 | `test_health_reports_models_ready_after_lifespan` + `test_load_whisper_returns_object_with_transcribe` | [x] |
-| SPEC-capa3 | AC-10 | `test_cleanup_purges_expired_entries` | [ ] |
+| SPEC-capa3 | AC-10 | `purge_expired` (11 unit tests in test_cleanup.py: stale/fresh, multi-user, empty-dir cascade, concurrent-safety, defensive) + lifespan wiring (3 integration tests in test_cleanup_lifespan.py: task created, purge invoked, cancelled on shutdown) | [x] |
 | SPEC-capa3 | AC-11 | `test_orchestrator_pipeline_timeout_raises_typed_error` (PipelineTimeout + lock release post-timeout) | [x] |
 | SPEC-capa3 | AC-12 | `test_cache_writes_and_reads_per_user` + `test_cache_isolates_users_via_filesystem_path` | [x] |
 | SPEC-capa3 | AC-13 | `test_get_returns_full_result_for_owner` | [x] |
-| SPEC-capa3 | AC-14 | E2E rig smoke (manual, registrar en `vram-budget.md`) — VRAM peak ≤ 7.5 GB no es testeable en CPU dev box; queda deferred a Task 7.3 en el rig. | [ ] (deferred to rig smoke 7.3) |
+| SPEC-capa3 | AC-14 | E2E rig smoke (manual). Template entregable: `docs/sesiones/2026-05-05-capa3-vram-budget.md` con secciones empty-fields para que el operador registre VRAM peak (≤ 7,500 MB), latencia, cache_hit second-pass, WER subjetivo, sign-off. | [x] template entregable; medición rig pendiente |
 | SPEC-capa3 | AC-15 | Load failure surface (5 tests) + POST 503 propagation: `test_post_returns_503_when_pyannote_failed_to_load` + `test_post_returns_503_when_whisper_failed_to_load` (with detail discriminator + Retry-After). | [x] |
 
 ---

@@ -24,8 +24,6 @@ import time
 import uuid
 from pathlib import Path
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers — build a populated cache layout that mirrors CacheStore's writes.
