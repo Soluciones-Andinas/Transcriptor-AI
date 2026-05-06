@@ -883,17 +883,149 @@ orchestrator + API + tests).
 
 ---
 
+## Categoría 9 — Drifts del spec Capa 4 (2026-05-06)
+
+> Drifts surgidos al verificar empíricamente los supuestos antes de escribir
+> el spec de Capa 4 (MCP server). Capturados durante la auditoría de
+> compatibilidad RF-MCP ↔ schema actual.
+
+### D-043 🟡 ADR-011 lista dos tools separadas para image upload; RF-MCP-01 unifica via `kind`
+
+**Asumido (`wiki/ADR/ADR-011.md` Tools MCP)**: el contrato MCP-first incluye
+DOS tools separadas para imágenes:
+- `request_image_upload_url(transcription_id)` → URL para subir imagen.
+- `attach_image(transcription_id, image_id, caption?)` → Asociar imagen
+  previamente uploaded a la transcripción.
+
+Y un resource `user://me/transcriptions` que es proxy a `list_my_transcriptions`.
+
+**Reality (`wiki/RF/RF-MCP.md`, refactor 2026-05-04)**: el RF unificó audio
+e imagen en una sola tool `request_upload_url(kind, file_size_bytes,
+mime_type?, transcription_id?)`. La asociación imagen-transcripción ocurre
+**en el momento del upload** via el campo `transcription_id` de la
+`upload_session`, no via tool separada `attach_image`. El resource
+`user://me/transcriptions` no existe — la tool `list_my_transcriptions`
+cubre el caso.
+
+**Por qué se decidió así**: una sola superficie tool por kind reduce el
+contrato MCP de 9 tools a 7. La asociación implícita por `transcription_id`
+en la upload session evita una segunda round-trip MCP. RF-MCP-01 step 7
+ya retorna `image_id` cuando `kind=image`, así que no hay nada que
+"attach" después.
+
+**Resolución**: el RF gana (canonical, autoritativo, fecha posterior). El
+ADR-011 queda con drift documentado pero **no se modifica** (regla de
+inmutabilidad de ADRs Aceptadas, CLAUDE.md §11). El spec de Capa 4
+referencia el RF como contrato y el ADR como rationale histórico de la
+decisión "MCP-first + REST mínimo para blobs".
+
+**Acción pendiente sobre wiki**: ninguna (el RF ya canoniza el contrato;
+el ADR queda inmutable). Si se decide revisitar el ADR con un ADR-016
+("Refinar superficie de tools MCP"), hacerlo en sesión dedicada.
+
+**Lección**: cuando un ADR enumera artefactos concretos (lista de tools,
+endpoints), esa enumeración tiende a stale en cuanto se hace el primer
+refactor del contrato. Mejor que el ADR exprese **principios** ("MCP-first
++ REST mínimo para blobs") y el RF enumere artefactos. El ADR-011 actual
+mezcla ambos; futuros ADRs deberían separar nivel-de-decisión vs
+nivel-de-artefacto.
+
+---
+
+### D-044 🟠 `upload_sessions` schema sin columna para el ephemeral `bearer_for_upload`
+
+**Asumido (RF-MCP-01 step 3 + RF-MCP-03 step 4)**: existe un bearer
+ephemeral de 32 chars random llamado `bearer_for_upload` que:
+1. Se genera en `request_upload_url` y se persiste en la upload session.
+2. Se entrega plaintext al cliente MCP (una sola vez).
+3. Se valida en `POST /api/upload` contra el header `Authorization: Bearer <plaintext>`.
+
+**Reality (verificación 2026-05-06 sobre `db/models/upload_session.py` +
+migración `352c7acf6f15_initial_schema.py`)**: el schema de la tabla
+`upload_sessions` tiene `bearer_id` (FK a `mcp_bearers.id` — el bearer
+del MCP que originó el request) pero **NO tiene columna para persistir
+el ephemeral bearer**. `nonce` viaja en query string (URL) y no debe
+reusarse como bearer (Privacy: leak de URL = full bypass). Sin columna
+para el hash del ephemeral bearer, `RF-MCP-03 step 4` ("Validar
+`Authorization` bearer match con el `bearer_for_upload` registrado") no
+es implementable contra el schema actual.
+
+**Decisión Franco (2026-05-06)**: Opción A — agregar columna
+`upload_bearer_hash TEXT NOT NULL` (SHA-256 hex del plaintext, mismo
+patrón que `mcp_bearers.token_hash`). Privacy > Simplicity: defense-in-
+depth aunque alguien lea logs/proxies, y el cost es 1 alembic migration
++ 5 LOC de hashing.
+
+**Resolución (esta sesión, 2026-05-06)**:
+- `wiki/05_modelo_datos.md` §2 `upload_sessions`: agregada la columna
+  `upload_bearer_hash TEXT NOT NULL` con descripción referenciando
+  RF-MCP-01 step 3 + RF-MCP-03 step 4.
+- `wiki/RF/RF-MCP.md` RF-MCP-01 step 3+5+7: explicitar que el plaintext
+  se hashea SHA-256 antes del INSERT y se entrega al cliente en step 7.
+- `wiki/RF/RF-MCP.md` RF-MCP-03 step 4: actualizar la validación a
+  `received_hash = SHA-256(header_plaintext).hex()` con `hmac.compare_digest`
+  contra `upload_sessions.upload_bearer_hash`.
+- Capa 4 Batch 0 (a redactar en spec): alembic migration que agregue la
+  columna + index opcional. Modelo `UploadSession` actualizado.
+
+**Acción pendiente**: la migration + ORM update queda en Capa 4 Batch 0.
+
+**Lección**: cuando RF y schema se escriben en paralelo (Capa 1 schema
++ Capa 6 RFs), los campos derivados de runtime patterns (hash de un
+plaintext que NUNCA se persiste) se omiten fácil. Para próximos cambios
+de schema vs RF, hacer un grep cruzado: cada `INSERT` / `UPDATE` listado
+en process steps de un RF debe matchear las columnas del modelo ORM 1:1.
+
+---
+
+### D-045 🟢 Capa 4 Batch 0: lint policy choque con frozen-file constraint
+
+**Asumido (Capa 4 plan §5 step 4)**: `ruff check src/ tests/ alembic/` debe
+salir clean post-Batch-0.
+
+**Reality (esta sesión)**: el initial migration
+`alembic/versions/352c7acf6f15_initial_schema.py` (frozen per Capa 4 §7
+hard constraints: "Do NOT modify ... frozen") tiene 4 warnings ruff
+preexistentes — 3× `UP007` (`Union[X, Y]` en `down_revision` /
+`branch_labels` / `depends_on` debería ser `X | Y` por `target-version =
+py310`) y 1× `UP035` (`from typing import Sequence` debería migrar a
+`from collections.abc import Sequence`). `alembic/env.py:96` también
+tiene un `N806` preexistente (`ALEMBIC_LOCK_KEY` debería ser lowercase).
+
+**Resolución (esta sesión)**: lint clean en TODO lo que esta sesión toca
+(`src/`, `tests/`, `alembic/versions/1a4f8c9b2d6e_add_upload_bearer_hash.py`).
+El frozen file y `env.py` se dejan como están — modificarlos viola §7.
+La interpretación operativa de §5 step 4 es "no introducir regresiones
+de lint en archivos NUEVOS o tocados por la batch"; el legacy preexistente
+es scope de un cleanup session futuro.
+
+**Acción pendiente**: una sesión de lint cleanup (Capa 5 cleanup window
+o post-merge stabilization) que: (a) desfroze el initial migration solo
+para auto-fix `UP007` + `UP035` (cambios cosméticos, NO schema), (b) fix
+`N806` en `env.py` o agregue per-file-noqa con justificación. Alternativa
+menos invasiva: agregar `[tool.ruff.lint.per-file-ignores]` para
+`alembic/versions/352c7acf6f15_initial_schema.py` y `alembic/env.py` en
+`pyproject.toml`. La decisión cae fuera de Capa 4.
+
+**Lección**: cuando un plan agrega un directorio nuevo al lint scope
+(Capa 4 §5 incluye `alembic/` por primera vez en la suite), correr el
+lint sobre ese directorio ANTES de redactar el plan para detectar legacy
+debt — sino la batch hereda el conflicto entre "lint clean" y "frozen
+file".
+
+---
+
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 35 (10 Capa 2 review + 2 Capa 3 Batch 1 + 3 operacionales rig + 1 Batch 3 + 1 Batch 4 + 2 Batch 5 + 4 Capa 3 review post-fix SD-3..6).
+**Total drifts identificados**: 38 (10 Capa 2 review + 2 Capa 3 Batch 1 + 3 operacionales rig + 1 Batch 3 + 1 Batch 4 + 2 Batch 5 + 4 Capa 3 review post-fix SD-3..6 + 2 Capa 4 spec audit + 1 Capa 4 Batch 0).
 
-**Severidad** (post-actualización 2026-05-05 incluyendo Capa 3 review fixes):
+**Severidad** (post-actualización 2026-05-06 incluyendo Capa 4 spec audit + Batch 0):
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
-- 🟠 HIGH: 6 (D-002, D-004, D-006, D-007, D-009, D-031, D-032)
-- 🟡 MEDIUM: 13 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033)
-- 🟢 LOW: 13 (D-012, D-013, D-019, D-020, D-022, D-034, D-035, D-036, D-037, D-038, D-039, D-040, D-041)
+- 🟠 HIGH: 7 (D-002, D-004, D-006, D-007, D-009, D-031, D-032, D-044)
+- 🟡 MEDIUM: 14 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033, D-043)
+- 🟢 LOW: 14 (D-012, D-013, D-019, D-020, D-022, D-034, D-035, D-036, D-037, D-038, D-039, D-040, D-041, D-045)
 
-**Drifts ya cerrados**: 30/35.
+**Drifts ya cerrados**: 35/37 (post sesión wiki 2026-05-06).
 
 - **Cerrados en wiki sesión 2026-05-05** (commits `60795ab..00d25ad` en branch `feat/capa3-pipeline`): D-014, D-016, D-017, D-018.
 - **D-013**: confirmado como falso drift (wiki ya correcta) — entrada actualizada.
@@ -913,18 +1045,28 @@ orchestrator + API + tests).
 | G6 | SD-3 + drift entries SD-4..6 | `73822e8` | normalize.py + this drift log + tests |
 | G7 | Drift sync + final push | (this commit) | this drift log |
 
-**Drifts pendientes de cierre (acciones concretas)**:
+**Sesión wiki dedicada 2026-05-06 (pre-spec Capa 4)** — cerradas:
+
+- **D-026** (REST entry): cerrado en `wiki/RF/RF-TRX.md` Nota de versión 2.1 — `POST /api/transcriptions` (Capa 3) marcado como transitional + deprecado en Capa 4 + removal en Capa 5. El contrato canónico sigue siendo MCP-driven.
+- **D-027** (per-user cache): cerrado en `wiki/05_modelo_datos.md` §1, `wiki/02_arquitectura.md` §5, `wiki/RF/RF-TRX.md` (todas las refs `cache/<audio_hash>` → `cache/<user_id>/<audio_hash>`), `wiki/RF/RF-CACHE.md` RF-CACHE-02 (walk per-user + TTL via `mtime` de `result.json`), `wiki/FL/FL-TRX-01.md` (sequence diagram).
+- **D-028** (lazy pyannote): cerrado en `wiki/02_arquitectura.md` §6 — agregada nota de loaders lazy `_whisperx_load_model` y `_pyannote_from_pretrained` para testability sin extras `[pipeline]`.
+- **D-040** (min_speakers semantics): cerrado en `wiki/RF/RF-TRX.md` RF-TRX-01 Special Cases — explícito que `min_speakers`/`max_speakers` son hints no requirements; pyannote es la autoridad.
+- **D-042** (HF 3-model accepts): cerrado en `wiki/RF/RF-TRX.md` Prerrequisitos HF — listados los TRES modelos gated (incluido `pyannote/speaker-diarization-community-1`).
+- **D-043** (ADR-011 vs RF-MCP unified upload): documentado en este log; sin cambios al ADR (regla de inmutabilidad). RF gana, ADR queda con drift histórico.
+- **D-044** (upload_bearer_hash column): cerrado en wiki — `05_modelo_datos.md` §2 + RF-MCP-01 step 3+5+7 + RF-MCP-03 step 4 sincronizados. La migration alembic queda como Capa 4 Batch 0.
+
+**Drifts pendientes (no-wiki o de capas posteriores)**:
 
 | ID | Acción | Tipo | Cuándo |
 |----|--------|------|--------|
-| D-010 | `/graphify --update` post-Capa 2 + Capa 3 fixes | proceso | tras merge de feat/capa3-pipeline a master |
+| D-010 | `/graphify --update` post wiki sync 2026-05-06 + Capa 3 fixes | proceso | después de cerrar este sync; antes del spec Capa 4 |
 | D-019 | Encryption key rotation versioning (key-id prefix) | code | post-Capa 6 o auditoría externa |
 | D-020 | `mcp_bearers.last_used_at` throttle 5 min | code | cuando Capa 6 muestre carga real |
 | D-021 | Test sub-app fixture refactor (sacar `/_test_mcp_*` del prod app) | tests | pre-Capa 6 |
 | D-022 | Callback service extraction (`auth/callback_service.py`) | refactor | cuando el handler vuelva a crecer |
 | D-033 | Documentar Postgres password rotation en deployment runbook | docs | Capa 7 (deployment runbook) |
-| D-026, D-027, D-028 | Wiki edits Capa 3 (REST entry, per-user cache, lazy pyannote) | wiki | post-merge Capa 3 a master |
-| D-040 | Documentar `min_speakers` semántica hint vs requirement en RF-TRX | wiki | post-merge Capa 3 a master |
+| D-044-impl | Alembic migration `add_upload_bearer_hash` + ORM update | code | Capa 4 Batch 0 |
+| (RF-CACHE-03 ↔ código) | RF-CACHE-03 todavía menciona `meta.json` corrupto; el código no usa `meta.json` (TTL = mtime). Drift menor: rewrite RF-CACHE-03 para "result.json corrupto / inaccesible / no-hex hash directory". | wiki | sesión wiki dedicada futura, no bloquea Capa 4 |
 
 **Pattern emergente para futuras capas**:
 1. Antes de cerrar specs/ADRs, validar las asunciones físicas (hardware, lib semantics, dialect-specific types) con un experimento mínimo.
