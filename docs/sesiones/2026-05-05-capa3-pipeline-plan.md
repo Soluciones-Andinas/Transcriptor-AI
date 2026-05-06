@@ -580,7 +580,7 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 | SPEC-capa3 | AC-3 | `test_post_transcription_unauthenticated_401` | [ ] |
 | SPEC-capa3 | AC-4 | `test_normalize_rejects_extension_outside_whitelist` + `test_normalize_rejects_magic_bytes_mismatch`. API surface `test_post_rejects_exe_file` deferred to Batch 6. | [x] (normalize layer) / [ ] (POST 400) |
 | SPEC-capa3 | AC-5 | `test_post_rejects_oversize` | [ ] |
-| SPEC-capa3 | AC-6 | `test_orchestrator_lock_serializes_two_jobs` | [ ] |
+| SPEC-capa3 | AC-6 | `test_orchestrator_serializes_two_concurrent_jobs_with_gpu_busy` + `test_orchestrator_lock_released_after_happy_completion` + `test_pipeline_timeout_is_distinct_from_gpu_busy` | [x] |
 | SPEC-capa3 | AC-7 | STT mapping: 5 tests in test_stt_transcribe.py. Orchestrator lock-release: `test_orchestrator_releases_lock_when_inner_raises_gpu_error` + `test_orchestrator_releases_lock_when_inner_raises_diarize_error` + `test_orchestrator_releases_lock_on_unexpected_exception`. DB-no-partial-row check covered implicitly: orchestrator only flushes on success path; on exception nothing is added (use of try/finally around DB ops). | [x] (STT + orchestrator) / [ ] (POST 500 mapping) |
 | SPEC-capa3 | AC-8 | `test_get_returns_404_for_other_user` | [ ] |
 | SPEC-capa3 | AC-9 | `test_health_reports_models_ready_after_lifespan` + `test_load_whisper_returns_object_with_transcribe` | [x] |
