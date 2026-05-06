@@ -28,11 +28,20 @@ ffmpeg/torch/pyannote/Postgres (mirrors the ``_whisperx_load_model`` /
 from __future__ import annotations
 
 import asyncio
+import logging
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from ..config import settings
+from ..db.scoping import bypass_scoping
+from . import diarize as _diarize_mod
+from . import normalize as _normalize_mod
+from . import stt as _stt_mod
+from .merge import assign_speakers_to_words
+
+logger = logging.getLogger("transcription_api.pipeline")
 
 
 # Module-level singleton: one GPU job at a time per FastAPI worker
@@ -72,6 +81,21 @@ class PipelineTimeout(Exception):
         )
 
 
+def _build_text_content(merged_segments: list[dict[str, Any]]) -> str:
+    """Render merged segments as ``SPEAKER_xx: text`` lines for full-text search.
+
+    The Postgres GIN tsvector index lives on ``transcriptions.text_content``,
+    so the indexed string must include the spoken words AND the speaker
+    label so future search ("what did SPEAKER_00 say about X") can hit.
+    """
+    lines = []
+    for segment in merged_segments:
+        speaker = segment.get("speaker", "UNKNOWN")
+        text = segment.get("text", "")
+        lines.append(f"{speaker}: {text}")
+    return "\n".join(lines)
+
+
 async def _run_pipeline(
     *,
     user_id: UUID,
@@ -90,13 +114,164 @@ async def _run_pipeline(
 ) -> dict[str, Any]:
     """Inner pipeline: normalize → cache → stt → diarize → merge → persist.
 
-    Stub for T5.1–T5.3 — those tasks exercise the surrounding lock and
-    timeout wrappers and patch this function out. T5.4 fills the body.
-    Raises ``NotImplementedError`` so a missing patch is loud, not silent.
+    The function is patchable as ``transcription_api.pipeline.orchestrator
+    ._run_pipeline``; tests for AC-6 / AC-7 / AC-11 substitute it with a
+    sleeper or a thrower to exercise the lock/timeout wrapper around it.
+
+    Production flow:
+    1. ffmpeg normalize → ``(wav_path, audio_hash, duration)``.
+    2. Per-user cache lookup. On hit (ALT-1) skip steps 3-5 and mark
+       ``metadata.cache_hit: true``; still persist a fresh row so the
+       user's history grows (D-027).
+    3. WhisperX transcribe. Empty segments (ALT-2 silent audio) skip
+       diarize+merge and persist with ``text_content=""``,
+       ``num_speakers=0``, ``metadata.silent_audio: true``.
+    4. pyannote diarize.
+    5. Merge word-level transcript with diarization speakers.
+    6. Cache write (canonical ``cache_hit: false`` so a future read hits
+       and overrides to true).
+    7. INSERT ``Transcription`` row inside ``bypass_scoping(db)`` —
+       declares the cross-bootstrap intent: the row's ``user_id`` IS the
+       active user, and an over-eager listener filter on the INSERT
+       statement would AND the same predicate twice (harmless but
+       inelegant). The bypass keeps the SQL emitted exactly what we
+       built.
+    8. Cleanup the normalized WAV in ``finally`` (Privacy > Cost — no
+       intermediate audio lingers on disk after the pipeline returns).
     """
-    raise NotImplementedError(
-        "_run_pipeline body lands in T5.4; tests must patch this seam"
+    # ------------------------------------------------------------------
+    # 1. Normalize (CPU-bound, run in thread pool to keep the loop free).
+    # ------------------------------------------------------------------
+    normalized_wav, audio_hash, duration_float = await asyncio.to_thread(
+        _normalize_mod.normalize_audio, file_path, upload_dir
     )
+
+    try:
+        # --------------------------------------------------------------
+        # 2. Cache lookup (per-user — D-027). Validation happens inside
+        # CacheStore; an invalid audio_hash from a buggy normalize raises
+        # ValueError which propagates and the orchestrator's outer
+        # try/finally releases the lock.
+        # --------------------------------------------------------------
+        cached = cache_store.get(user_id, audio_hash)
+        if cached is not None:
+            payload = {
+                **cached,
+                "audio_hash": audio_hash,
+                "metadata": {**cached.get("metadata", {}), "cache_hit": True},
+            }
+        else:
+            # ----------------------------------------------------------
+            # 3. STT (GPU-bound — `transcribe` is sync; thread-pool
+            # offload keeps the event loop responsive).
+            # ----------------------------------------------------------
+            stt_result = await asyncio.to_thread(
+                _stt_mod.transcribe,
+                whisper_model,
+                normalized_wav,
+                language=language,
+            )
+            stt_segments = stt_result.get("segments", [])
+            detected_language = stt_result.get("language", language)
+
+            if not stt_segments:
+                # ALT-2 — silent audio. Skip diarize+merge.
+                payload = {
+                    "audio_hash": audio_hash,
+                    "language": detected_language,
+                    "duration_seconds": duration_float,
+                    "num_speakers": 0,
+                    "text_content": "",
+                    "segments": [],
+                    "metadata": {
+                        "model": settings.whisper_model,
+                        "diarizer": settings.pyannote_model,
+                        "compute_type": settings.compute_type,
+                        "cache_hit": False,
+                        "silent_audio": True,
+                    },
+                }
+            else:
+                # ------------------------------------------------------
+                # 4. Diarize (GPU-bound — same thread-pool rationale).
+                # ------------------------------------------------------
+                diarization = await asyncio.to_thread(
+                    _diarize_mod.diarize,
+                    pyannote_pipeline,
+                    normalized_wav,
+                    num_speakers=num_speakers,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                )
+                # 5. Merge — pure Python, fast enough to stay in the loop.
+                merged_segments = assign_speakers_to_words(
+                    stt_segments, diarization
+                )
+                unique_speakers = {
+                    seg.get("speaker")
+                    for seg in merged_segments
+                    if seg.get("speaker")
+                }
+                payload = {
+                    "audio_hash": audio_hash,
+                    "language": detected_language,
+                    "duration_seconds": duration_float,
+                    "num_speakers": len(unique_speakers),
+                    "text_content": _build_text_content(merged_segments),
+                    "segments": merged_segments,
+                    "metadata": {
+                        "model": settings.whisper_model,
+                        "diarizer": settings.pyannote_model,
+                        "compute_type": settings.compute_type,
+                        "cache_hit": False,
+                    },
+                }
+
+            # 6. Cache write — store canonical (cache_hit=False) version.
+            # A future read overrides to True at lookup time (above).
+            cache_store.put(user_id, audio_hash, payload)
+
+        # --------------------------------------------------------------
+        # 7. Persist row. Bootstrap insert: the row's user_id IS the
+        # active user, so the listener's WHERE injection on this INSERT
+        # would be a redundant AND of the same predicate. bypass_scoping
+        # keeps the emitted SQL exactly what we built and documents the
+        # cross-bootstrap intent (ADR-014/015 + D-014).
+        # --------------------------------------------------------------
+        from ..db.models import Transcription
+
+        with bypass_scoping(db):
+            row = Transcription(
+                user_id=user_id,
+                audio_hash=audio_hash,
+                original_filename=original_filename,
+                original_size_bytes=original_size_bytes,
+                duration_seconds=Decimal(str(payload["duration_seconds"])),
+                language=payload["language"],
+                num_speakers=payload["num_speakers"],
+                text_content=payload["text_content"],
+                segments={"segments": payload["segments"]},
+                extra_metadata=payload["metadata"],
+            )
+            db.add(row)
+            await db.flush()
+
+        return {
+            "transcription_id": row.id,
+            **payload,
+        }
+    finally:
+        # AC-1 cleanup invariant: regardless of outcome, the normalized
+        # WAV does not linger on disk. The cache stores the JSON result
+        # under cache_store's own base_dir, NOT under upload_dir.
+        try:
+            normalized_wav.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "normalized_wav_cleanup_failed path=%s error_id=NORMALIZED_WAV_LEAK",
+                normalized_wav,
+                exc_info=True,
+            )
 
 
 async def orchestrate(
