@@ -181,6 +181,14 @@ from .auth import router as auth_router  # noqa: E402
 app.include_router(auth_router)
 
 
+# Capa 3 — wire the transcriptions API (POST + GET /api/transcriptions).
+# The router uses Depends(get_current_user_mcp) for bearer auth and
+# Depends(get_session) for the request-scoped DB session.
+from .api import transcriptions_router  # noqa: E402
+
+app.include_router(transcriptions_router)
+
+
 # ---------------------------------------------------------------------------
 # ERR-2 — pool exhaustion → HTTP 503 with stable error_code.
 # ---------------------------------------------------------------------------
