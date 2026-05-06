@@ -1,4 +1,4 @@
-"""pyannote diarization loader with verbose error classification.
+"""pyannote diarization loader and inference wrapper.
 
 Spec: SPEC-capa3-pipeline-v1
 Covers:
@@ -10,6 +10,16 @@ Covers:
   `app.state.pyannote_detail`; /health echoes it as `models.pyannote_detail`,
   and `POST /api/transcriptions` returns 503 `MODELS_NOT_LOADED` with the
   same detail propagated. Service stays UP (D-028: lazy + verbose).
+- AC-1  — `diarize(pipeline_obj, wav_path, ...)` is the orchestrator-facing
+  inference wrapper that returns ``list[(start, end, speaker)]`` tuples
+  consumed by ``pipeline.merge.assign_speakers_to_words`` (Batch 4 task 4.2).
+- ALT-3 — When pyannote returns more unique speakers than ``max_speakers``,
+  the wrapper caps the result by relabeling the smallest-duration speakers
+  to the temporally-closest top-N speaker (cap-by-relabel: one-pass, no
+  pipeline re-run, see D-035).
+- error catalog ``PIPELINE_DIARIZE_ERROR`` — pyannote runtime faults are
+  mapped to ``PipelineDiarizeError`` so the orchestrator (Batch 5) can
+  release the GPU lock and the API layer (Batch 6) can return HTTP 500.
 
 The pyannote import is delayed for the same reason described in `stt.py`:
 CPU-only machines without the `[pipeline]` extras must still be able to
@@ -17,6 +27,8 @@ import this module so the package surface is testable via mocks.
 """
 from __future__ import annotations
 
+from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 # Discriminators surfaced to /health and to the 503 body of POST. Stable
@@ -84,3 +96,143 @@ def load_pyannote_pipeline(
         ):
             raise PyannoteLoadError(DETAIL_TERMS_NOT_ACCEPTED, str(exc)) from exc
         raise PyannoteLoadError(DETAIL_UNKNOWN, str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# AC-1 + ALT-3 — diarize wrapper
+# ---------------------------------------------------------------------------
+class PipelineDiarizeError(Exception):
+    """Raised when the pyannote pipeline fails at inference time.
+
+    Distinct from ``PyannoteLoadError`` (which fires at startup if the model
+    can't be loaded). The API layer (Batch 6) maps this to HTTP 500
+    ``PIPELINE_DIARIZE_ERROR`` per the spec error catalog.
+    """
+
+
+def _pyannote_run_pipeline(
+    pipeline_obj: Any,
+    wav_path: str,
+    *,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> list[tuple[float, float, str]]:
+    """Run the pyannote pipeline on ``wav_path`` and yield RTTM-shaped tuples.
+
+    Indirection level so unit tests can patch this out and exercise the
+    surrounding wrapper logic (forwarding kwargs, ALT-3 cap, error mapping)
+    without pyannote.audio installed. Mirrors the ``_whisperx_load_model``
+    pattern from Batch 1.
+
+    The conversion from pyannote's ``Annotation`` to a plain list of tuples
+    happens here so downstream code (orchestrator, merge) does not import
+    pyannote types.
+    """
+    kwargs: dict[str, Any] = {}
+    if num_speakers is not None:
+        kwargs["num_speakers"] = num_speakers
+    if min_speakers is not None:
+        kwargs["min_speakers"] = min_speakers
+    if max_speakers is not None:
+        kwargs["max_speakers"] = max_speakers
+
+    annotation = pipeline_obj(wav_path, **kwargs)
+    # pyannote returns a pyannote.core.Annotation; itertracks with
+    # yield_label=True yields (segment, track_id, speaker_label).
+    return [
+        (float(seg.start), float(seg.end), str(label))
+        for seg, _track, label in annotation.itertracks(yield_label=True)
+    ]
+
+
+def _cap_speakers_by_duration(
+    segments: list[tuple[float, float, str]], max_speakers: int
+) -> list[tuple[float, float, str]]:
+    """Cap unique speakers to ``max_speakers`` by relabel (ALT-3, D-035).
+
+    Algorithm:
+    1. Sum total duration per speaker.
+    2. Keep the ``max_speakers`` highest-duration speakers ("top-N").
+    3. For each segment whose speaker is NOT in top-N, relabel it to the
+       top-N speaker that is temporally closest (mid-point distance to the
+       nearest top-N segment).
+
+    Cheaper than re-running pyannote with ``min=max=hint`` (which doubles
+    GPU time and VRAM peak); the approximation is acceptable when the hint
+    is treated as advisory rather than ground truth (most Sandinas meetings
+    where this hint is supplied).
+    """
+    if max_speakers <= 0:
+        return segments
+
+    durations: dict[str, float] = defaultdict(float)
+    for start, end, speaker in segments:
+        durations[speaker] += end - start
+
+    if len(durations) <= max_speakers:
+        return segments
+
+    top_n = {
+        spk
+        for spk, _ in sorted(
+            durations.items(), key=lambda kv: kv[1], reverse=True
+        )[:max_speakers]
+    }
+    top_n_segments = [s for s in segments if s[2] in top_n]
+
+    def _nearest_top_speaker(mid: float) -> str:
+        return min(
+            top_n_segments,
+            key=lambda s: abs(((s[0] + s[1]) / 2.0) - mid),
+        )[2]
+
+    return [
+        (start, end, speaker)
+        if speaker in top_n
+        else (start, end, _nearest_top_speaker((start + end) / 2.0))
+        for start, end, speaker in segments
+    ]
+
+
+def diarize(
+    pipeline_obj: Any,
+    wav_path: Path | str,
+    *,
+    num_speakers: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> list[tuple[float, float, str]]:
+    """Run pyannote diarization and return ``list[(start, end, speaker)]``.
+
+    Forwards the optional speaker hints to the pyannote pipeline. If
+    ``max_speakers`` is set and the pipeline returns more unique speakers,
+    the result is capped by relabel (ALT-3 + D-035: cap-by-relabel rather
+    than a strict re-run).
+
+    Maps generic pyannote runtime faults to ``PipelineDiarizeError`` so the
+    orchestrator can release the GPU lock and the API can return HTTP 500
+    ``PIPELINE_DIARIZE_ERROR`` per the spec catalog.
+    """
+    # Build kwargs conditionally so the indirection (and the underlying
+    # pyannote call inside it) never sees ``key=None``. Some pyannote
+    # versions interpret that as "set to None" rather than "not specified".
+    kwargs: dict[str, Any] = {}
+    if num_speakers is not None:
+        kwargs["num_speakers"] = num_speakers
+    if min_speakers is not None:
+        kwargs["min_speakers"] = min_speakers
+    if max_speakers is not None:
+        kwargs["max_speakers"] = max_speakers
+
+    try:
+        segments = _pyannote_run_pipeline(pipeline_obj, str(wav_path), **kwargs)
+    except PipelineDiarizeError:
+        raise
+    except Exception as exc:
+        raise PipelineDiarizeError(str(exc)) from exc
+
+    if max_speakers is not None:
+        segments = _cap_speakers_by_duration(segments, max_speakers)
+
+    return segments
