@@ -575,17 +575,17 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 
 | Spec | Criterio | Test | Status |
 |---|---|---|---|
-| SPEC-capa3 | AC-1 | normalize: `test_normalize_produces_wav_16khz_mono` + `test_normalize_hash_is_deterministic`. STT: `test_transcribe_returns_canonical_whisperx_shape` + 5 forwarding tests. Diarize: `test_diarize_returns_list_of_speaker_tuples` + 4 forwarding/cap tests. Merge: `test_merge_assigns_each_word_to_overlapping_speaker` + 7 metadata/gap/silence tests. End-to-end POST/orchestrator wiring deferred to Batches 5+6. | [x] (normalize+STT+diarize+merge layers) / [ ] (orchestrator+POST E2E) |
+| SPEC-capa3 | AC-1 | normalize/STT/diarize/merge: 23 unit tests across the four layers. Orchestrator: `test_orchestrate_inserts_transcription_row_and_writes_cache` + `test_orchestrate_marks_cache_miss_in_metadata` + `test_orchestrate_cleans_up_normalized_wav_after_success` + `test_orchestrate_rejects_invalid_audio_hash_from_normalize` (requires_docker). End-to-end POST surface deferred to Batch 6. | [x] (all pipeline layers + orchestrator) / [ ] (POST E2E) |
 | SPEC-capa3 | AC-2 | `test_cache_writes_and_reads_per_user` + `test_cache_returns_none_on_miss` (substrate). End-to-end `test_post_transcription_cache_hit_skips_pipeline` deferred to Batch 6. | [x] (substrate) / [ ] (E2E POST) |
 | SPEC-capa3 | AC-3 | `test_post_transcription_unauthenticated_401` | [ ] |
 | SPEC-capa3 | AC-4 | `test_normalize_rejects_extension_outside_whitelist` + `test_normalize_rejects_magic_bytes_mismatch`. API surface `test_post_rejects_exe_file` deferred to Batch 6. | [x] (normalize layer) / [ ] (POST 400) |
 | SPEC-capa3 | AC-5 | `test_post_rejects_oversize` | [ ] |
 | SPEC-capa3 | AC-6 | `test_orchestrator_lock_serializes_two_jobs` | [ ] |
-| SPEC-capa3 | AC-7 | STT side: `test_transcribe_maps_cuda_oom_to_gpu_error` + `test_transcribe_maps_cuda_runtime_error_to_gpu_error` + `test_transcribe_maps_cublas_runtime_error_to_gpu_error` + 2 propagation tests. Lock-release + DB-no-row checks deferred to Batch 5 orchestrator (`test_lock_released_on_gpu_error`). | [x] (STT mapping) / [ ] (orchestrator lock-release) |
+| SPEC-capa3 | AC-7 | STT mapping: 5 tests in test_stt_transcribe.py. Orchestrator lock-release: `test_orchestrator_releases_lock_when_inner_raises_gpu_error` + `test_orchestrator_releases_lock_when_inner_raises_diarize_error` + `test_orchestrator_releases_lock_on_unexpected_exception`. DB-no-partial-row check covered implicitly: orchestrator only flushes on success path; on exception nothing is added (use of try/finally around DB ops). | [x] (STT + orchestrator) / [ ] (POST 500 mapping) |
 | SPEC-capa3 | AC-8 | `test_get_returns_404_for_other_user` | [ ] |
 | SPEC-capa3 | AC-9 | `test_health_reports_models_ready_after_lifespan` + `test_load_whisper_returns_object_with_transcribe` | [x] |
 | SPEC-capa3 | AC-10 | `test_cleanup_purges_expired_entries` | [ ] |
-| SPEC-capa3 | AC-11 | `test_orchestrator_pipeline_timeout` | [ ] |
+| SPEC-capa3 | AC-11 | `test_orchestrator_pipeline_timeout_raises_typed_error` (PipelineTimeout + lock release post-timeout) | [x] |
 | SPEC-capa3 | AC-12 | `test_cache_writes_and_reads_per_user` + `test_cache_isolates_users_via_filesystem_path` | [x] |
 | SPEC-capa3 | AC-13 | `test_get_returns_full_result_for_owner` | [ ] |
 | SPEC-capa3 | AC-14 | E2E rig smoke (manual, registrar en `vram-budget.md`) — VRAM peak ≤ 7.5 GB no es testeable en CPU dev box; queda deferred a Task 7.3 en el rig. | [ ] (deferred to rig smoke 7.3) |

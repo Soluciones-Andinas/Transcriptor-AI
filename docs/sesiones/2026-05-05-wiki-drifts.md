@@ -590,6 +590,66 @@ uno.
 
 ---
 
+### D-036 🟢 Capa 3 Batch 5: cache stores `cache_hit: false` canónicamente, override a `true` en read-time
+
+**Asumido (intuición naïve)**: si el orchestrator detecta un cache hit
+(ALT-1) y persiste la fila marcada como `cache_hit: true`, lo natural
+sería ESCRIBIR `cache_hit: true` en el archivo del filesystem para que
+una lectura futura lo refleje.
+
+**Reality (este commit, `c9e6284`)**: el cache filesystem siempre
+guarda `metadata.cache_hit: false`. Cuando un cache hit ocurre, el
+orchestrator hace un override en memoria: `payload = {**cached,
+"metadata": {**cached.metadata, "cache_hit": True}}`. La fila de DB
+y el response sí llevan `cache_hit: true`; el archivo en disk no.
+
+**Resolución**: mantener la asimetría. El cache file representa "el
+trabajo computado por una corrida pasada" — su metadata es congelada
+al momento del compute (modelo, diarizer, compute_type). El flag
+`cache_hit` describe **esta** request, no la corrida histórica que
+generó el payload. Si todas las re-reads escribieran `true` en disk,
+después de N hits el archivo perdería la información de "cuándo se
+computó realmente esto" (porque cada hit pisa la metadata).
+
+**Acción pendiente**: ninguna. La invariante es un detalle del
+orchestrator y los tests T5.4 lo cubren explícitamente
+(`test_orchestrate_cache_hit_skips_stt_and_diarize` verifica
+`result.metadata.cache_hit is True`).
+
+**Lección**: cuando un flag existe en dos planos (request y storage),
+elegir cuál es la **fuente de verdad** y derivar el otro. Aquí el
+storage es immutable post-compute (`compute_hit: false` siempre);
+el flag de hit-vs-miss es una propiedad de la request, no del payload.
+
+---
+
+### D-037 🟢 Capa 3 Batch 5: orchestrator hace `flush()`, no `commit()`
+
+**Asumido (en algunos planes)**: los servicios de aplicación (use
+cases) controlan su propia transaction, terminándola con commit/rollback.
+
+**Reality (este commit, `c9e6284`)**: `_run_pipeline` hace `db.add(row)`
+y `await db.flush()` — pero NO `commit()`. La transacción queda
+abierta; el caller (la dependency `get_session()` en Batch 6) decide
+commit en el happy path y rollback si la request raisea.
+
+**Resolución**: mantener flush-only. Esto matchea el patrón FastAPI
++ SQLAlchemy 2.x async: la dependency es la dueña de la transaction
+(commit en `finally`, rollback en `except`). El orchestrator es
+re-usable en jobs offline (donde el caller maneja la transaction
+diferente) sin tener que parametrizar el commit boundary.
+
+**Acción pendiente**: cuando Batch 6 escriba el endpoint POST
+`/api/transcriptions`, asegurar que la dependency `get_session()`
+hace `await session.commit()` post-orchestrate (o tras un `try/except`
+que rollback). Si esa dependency aún no existe, crearla con ese contrato.
+
+**Lección**: separar "build the row" (orchestrator) de "commit the
+transaction" (request lifecycle owner) hace que el orchestrator sea
+re-usable en background workers sin tocar su firma.
+
+---
+
 ### D-035 🟢 Capa 3 Batch 4: ALT-3 implementado como cap-by-relabel, no como pipeline re-run
 
 **Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-spec.md` ALT-3)**:
@@ -667,15 +727,15 @@ orchestrator + API + tests).
 
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 29 (10 de Capa 2 review + 2 de Capa 3 Batch 1 + 3 operacionales del primer rig deployment + 1 de Capa 3 Batch 3 + 1 de Capa 3 Batch 4).
+**Total drifts identificados**: 31 (10 de Capa 2 review + 2 de Capa 3 Batch 1 + 3 operacionales del primer rig deployment + 1 de Capa 3 Batch 3 + 1 de Capa 3 Batch 4 + 2 de Capa 3 Batch 5).
 
-**Severidad** (post-actualización 2026-05-05 sesión wiki + drifts deployment + Batch 3 + Batch 4):
+**Severidad** (post-actualización 2026-05-05 sesión wiki + drifts deployment + Batches 3-5):
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
 - 🟠 HIGH: 6 (D-002, D-004, D-006, D-007, D-009, D-031, D-032)
 - 🟡 MEDIUM: 13 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033)
-- 🟢 LOW: 7 (D-012, D-013, D-019, D-020, D-022, D-034, D-035)
+- 🟢 LOW: 9 (D-012, D-013, D-019, D-020, D-022, D-034, D-035, D-036, D-037)
 
-**Drifts ya cerrados**: 24/29.
+**Drifts ya cerrados**: 26/31.
 - **Cerrados en wiki esta sesión** (commits `60795ab..00d25ad` en branch `feat/capa3-pipeline`): D-014 (ADR-015 supersedes ADR-014), D-016 (RF-AUTH-01 multi-tab), D-017 (RF-AUTH-08 banner UI), D-018 (RF-MCP-00 contract anchor).
 - **D-013**: confirmado como falso drift (wiki ya correcta) — entrada actualizada arriba.
 - **D-031, D-032**: cerrados en código (commits `6dcacc4` logging fix + `d034b51` httpx promotion).
