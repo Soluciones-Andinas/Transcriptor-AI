@@ -184,3 +184,46 @@ def test_alembic_url_conversion_handles_asyncpg():
         _convert("postgresql://u:p@h/db")  # bare driver — must fail loudly
     with pytest.raises(RuntimeError, match="unexpected URL"):
         _convert("mysql+aiomysql://u:p@h/db")  # wrong dialect
+
+
+# ---------------------------------------------------------------------------
+# Capa 4 AC-15 — `upload_bearer_hash` column added by the
+# add_upload_bearer_hash migration (Batch 0). Validates the column exists,
+# is TEXT, and is NOT NULL after `alembic upgrade head` runs against a
+# fresh testcontainer. Closes D-044 at the schema level: without this
+# column, RF-MCP-03 step 4 (validate ephemeral bearer against stored hash)
+# cannot be implemented.
+# ---------------------------------------------------------------------------
+@pytest.mark.requires_docker
+async def test_upload_sessions_has_upload_bearer_hash_after_upgrade(engine):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-15 — Given a fresh DB with `alembic upgrade head`
+    applied, When inspecting ``information_schema.columns`` for
+    ``upload_sessions``, Then the ``upload_bearer_hash`` column exists
+    with ``data_type='text'`` and ``is_nullable='NO'``.
+    """
+    from sqlalchemy import text
+
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT data_type, is_nullable "
+                "FROM information_schema.columns "
+                "WHERE table_name = 'upload_sessions' "
+                "AND column_name = 'upload_bearer_hash'"
+            )
+        )
+        row = result.first()
+
+    assert row is not None, (
+        "upload_sessions.upload_bearer_hash column missing — "
+        "add_upload_bearer_hash migration not applied?"
+    )
+    assert row.data_type == "text", (
+        f"upload_bearer_hash should be TEXT (sha256 hex); got {row.data_type}"
+    )
+    assert row.is_nullable == "NO", (
+        f"upload_bearer_hash must be NOT NULL (RF-MCP-03 contract); "
+        f"got is_nullable={row.is_nullable}"
+    )
