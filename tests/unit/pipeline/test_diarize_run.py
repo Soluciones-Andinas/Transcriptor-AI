@@ -30,7 +30,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Canonical diarization shape: list of (start_sec, end_sec, speaker_label).
 # This is the contract `pipeline.merge.assign_speakers_to_words` consumes.

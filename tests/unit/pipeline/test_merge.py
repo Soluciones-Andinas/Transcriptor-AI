@@ -15,8 +15,6 @@ Tests use only stdlib + pytest; no torch / whisperx / pyannote needed.
 """
 from __future__ import annotations
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Canonical fixtures matching the spec's example shapes.

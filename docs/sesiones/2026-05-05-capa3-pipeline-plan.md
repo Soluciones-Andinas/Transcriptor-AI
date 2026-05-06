@@ -575,7 +575,7 @@ async def test_cleanup_purges_expired_entries(tmp_path):
 
 | Spec | Criterio | Test | Status |
 |---|---|---|---|
-| SPEC-capa3 | AC-1 | normalize: `test_normalize_produces_wav_16khz_mono` + `test_normalize_hash_is_deterministic`. STT wrapper: `test_transcribe_returns_canonical_whisperx_shape` + 5 forwarding tests. End-to-end POST/orchestrator wiring deferred to Batches 5+6. | [x] (normalize+STT layers) / [ ] (orchestrator+POST E2E) |
+| SPEC-capa3 | AC-1 | normalize: `test_normalize_produces_wav_16khz_mono` + `test_normalize_hash_is_deterministic`. STT: `test_transcribe_returns_canonical_whisperx_shape` + 5 forwarding tests. Diarize: `test_diarize_returns_list_of_speaker_tuples` + 4 forwarding/cap tests. Merge: `test_merge_assigns_each_word_to_overlapping_speaker` + 7 metadata/gap/silence tests. End-to-end POST/orchestrator wiring deferred to Batches 5+6. | [x] (normalize+STT+diarize+merge layers) / [ ] (orchestrator+POST E2E) |
 | SPEC-capa3 | AC-2 | `test_cache_writes_and_reads_per_user` + `test_cache_returns_none_on_miss` (substrate). End-to-end `test_post_transcription_cache_hit_skips_pipeline` deferred to Batch 6. | [x] (substrate) / [ ] (E2E POST) |
 | SPEC-capa3 | AC-3 | `test_post_transcription_unauthenticated_401` | [ ] |
 | SPEC-capa3 | AC-4 | `test_normalize_rejects_extension_outside_whitelist` + `test_normalize_rejects_magic_bytes_mismatch`. API surface `test_post_rejects_exe_file` deferred to Batch 6. | [x] (normalize layer) / [ ] (POST 400) |

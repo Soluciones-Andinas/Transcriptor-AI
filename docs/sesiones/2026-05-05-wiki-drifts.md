@@ -590,6 +590,48 @@ uno.
 
 ---
 
+### D-035 🟢 Capa 3 Batch 4: ALT-3 implementado como cap-by-relabel, no como pipeline re-run
+
+**Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-spec.md` ALT-3)**:
+> ALT-3: pyannote detecta más speakers que el `max_speakers` hint
+> → Honor el hint: re-run con `min=max=hint` o usar el resultado capped.
+> Decisión: respetar el hint estricto.
+
+La frase "re-run con min=max=hint" sugiere invocar el pipeline pyannote
+una segunda vez con los parámetros forzados — lo cual duplica latencia
+GPU y pico de VRAM en cada llamada con cap activo.
+
+**Reality (este commit, `25de530`)**: el wrapper implementa
+`_cap_speakers_by_duration` que opera sobre la salida ya producida —
+una sola pasada por pyannote, una sola pasada extra en CPU para:
+1. Sumar duración por speaker.
+2. Quedarse con los top-N por duración total (most-talkative win).
+3. Relabel cada segmento de un speaker no-top-N al speaker top-N
+   temporalmente más cercano (mid-point distance).
+
+**Resolución**: mantener cap-by-relabel. El spec acepta "o usar el
+resultado capped" como alternativa válida. El trade-off es:
+- **Pros**: una sola corrida del pipeline (~30s/min de audio en RTX
+  4060 Ti); sin pico extra de VRAM; sin riesgo de que el segundo run
+  con `min=max` no converja.
+- **Cons**: el resultado es ligeramente menos preciso porque pyannote
+  no "decidió" producir N speakers, sino que el wrapper colapsó
+  N+k a N a posteriori. Para reuniones con un speaker que habla 1%
+  del tiempo, ese speaker desaparece (queda relabeleado al cercano).
+
+**Acción pendiente**: si en Task 7.3 (rig smoke) un audio real revela
+que la pérdida de precisión es problemática, considerar agregar una
+flag `cap_strategy = "relabel" | "rerun"` y elegir por env var.
+Mientras tanto, default cap-by-relabel.
+
+**Lección**: cuando el spec ofrece dos alternativas equivalentes, el
+implementador elige la más simple por default (CLAUDE.md §4 priority:
+Simplicity > Performance > Cost) y documenta la decisión para que el
+reviewer la pueda contestar sin tener que descubrir el trade-off
+leyendo código.
+
+---
+
 ### D-034 🟢 Capa 3 Batch 3: `stt.transcribe` retorna dict canónico, no `list[Segment]`
 
 **Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-plan.md` Task 3.1 RED)**:
@@ -625,15 +667,15 @@ orchestrator + API + tests).
 
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 28 (10 de Capa 2 review + 2 de Capa 3 Batch 1 + 3 operacionales del primer rig deployment + 1 de Capa 3 Batch 3).
+**Total drifts identificados**: 29 (10 de Capa 2 review + 2 de Capa 3 Batch 1 + 3 operacionales del primer rig deployment + 1 de Capa 3 Batch 3 + 1 de Capa 3 Batch 4).
 
-**Severidad** (post-actualización 2026-05-05 sesión wiki + drifts deployment + Batch 3):
+**Severidad** (post-actualización 2026-05-05 sesión wiki + drifts deployment + Batch 3 + Batch 4):
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
 - 🟠 HIGH: 6 (D-002, D-004, D-006, D-007, D-009, D-031, D-032)
 - 🟡 MEDIUM: 13 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033)
-- 🟢 LOW: 6 (D-012, D-013, D-019, D-020, D-022, D-034)
+- 🟢 LOW: 7 (D-012, D-013, D-019, D-020, D-022, D-034, D-035)
 
-**Drifts ya cerrados**: 23/28.
+**Drifts ya cerrados**: 24/29.
 - **Cerrados en wiki esta sesión** (commits `60795ab..00d25ad` en branch `feat/capa3-pipeline`): D-014 (ADR-015 supersedes ADR-014), D-016 (RF-AUTH-01 multi-tab), D-017 (RF-AUTH-08 banner UI), D-018 (RF-MCP-00 contract anchor).
 - **D-013**: confirmado como falso drift (wiki ya correcta) — entrada actualizada arriba.
 - **D-031, D-032**: cerrados en código (commits `6dcacc4` logging fix + `d034b51` httpx promotion).
