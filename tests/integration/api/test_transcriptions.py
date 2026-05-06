@@ -34,7 +34,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
 
 from tests.factories import make_bearer, make_transcription, make_user
 from transcription_api.auth.mcp_bearer import generate_bearer
