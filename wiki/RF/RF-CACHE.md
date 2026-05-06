@@ -156,15 +156,18 @@ Sin inputs externos. Lee del filesystem.
 
 | # | Paso | Componente responsable |
 |---|---|---|
-| 1 | Capturar `start_time = time.monotonic()` y `now = datetime.now(timezone.utc)` | Cleanup |
+| 1 | Capturar `start_time = time.monotonic()` y `now = time.time()` | Cleanup |
 | 2 | Inicializar `entries_purged=0`, `bytes_freed=0` | Cleanup |
-| 3 | Listar `os.listdir(<DATA_DIR>/cache/)` | Cleanup |
-| 4 | Para cada `<hash>` (que sea directorio y match regex `^[0-9a-f]{64}$`): | Cleanup |
-| 4a | Leer `<hash>/meta.json` (delegado en RF-CACHE-03 si falla) | Cleanup |
-| 4b | Calcular `age = now - parse_iso(meta.created_at)` | Cleanup |
-| 4c | Si `age > timedelta(seconds=meta.ttl_seconds)`: medir tamaño con `du`, eliminar con `shutil.rmtree(<hash>)`, incrementar contadores, emitir log `cache_entry_purged` | Cleanup |
-| 4d | Si `age <= ttl`: skip silencioso | Cleanup |
+| 3 | Walk per-user (D-027): para cada `<user_id>` directorio que match UUID en `<DATA_DIR>/cache/`: | Cleanup |
+| 3a | Para cada `<audio_hash>` directorio que match regex `^[0-9a-f]{64}$` dentro de `<user_id>/`: | Cleanup |
+| 3b | Leer `mtime = os.stat(<user_id>/<audio_hash>/result.json).st_mtime` | Cleanup |
+| 3c | Si `now - mtime > ttl_seconds`: medir tamaño, eliminar con `shutil.rmtree(<user_id>/<audio_hash>)`, incrementar contadores, emitir log `cache_entry_purged` | Cleanup |
+| 3d | Si `now - mtime <= ttl_seconds`: skip silencioso | Cleanup |
+| 3e | Si `result.json` no existe (entrada corrupta o legacy con meta.json + transcription.json) → delegar a RF-CACHE-03 | Cleanup |
+| 4 | Cascade rmdir best-effort: `<user_id>/` queda vacío tras purgar todos sus hashes → `os.rmdir(<user_id>/)`. No-op si tiene hashes vivos. | Cleanup |
 | 5 | Emitir log `cache_cleanup_completed` con `entries_purged`, `bytes_freed`, `duration_ms = (time.monotonic() - start_time) * 1000` | Cleanup |
+
+> **Cambio de contrato Capa 3 (D-027 + D-NEW-FILENAME)**: el cache ahora vive en `<DATA_DIR>/cache/<user_id>/<audio_hash>/result.json` (single file, no más `meta.json` + `transcription.json` separados). El TTL es derivado del `mtime` del `result.json`, no de un campo `meta.created_at`. Resultado: aislamiento de privacidad estricto por user (dos users con el mismo audio NO comparten resultado), y un archivo menos por entrada. La asunción "schema_version mismatch" desaparece (no hay schema dentro de `meta.json`).
 
 ### Outputs
 
@@ -281,7 +284,7 @@ Scenario: PermissionError al eliminar no aborta el barrido
 
 ### Inputs
 
-Path al directorio `<DATA_DIR>/cache/<hash>/`.
+Path al directorio `<DATA_DIR>/cache/<user_id>/<audio_hash>/`.
 
 ### Process Steps (Happy Path)
 

@@ -172,11 +172,11 @@ Scenario: Sin header
 |---|---|
 | 1 | Validar inputs (RF-TRX-03 cubre la validación de audio) |
 | 2 | Si `kind=image`: SELECT transcriptions WHERE id=transcription_id AND user_id=bearer.user_id; si no existe → `TRANSCRIPTION_NOT_FOUND` |
-| 3 | Generar `upload_id` (UUID), `nonce` (32 chars random), `bearer_for_upload` (32 chars random) |
+| 3 | Generar `upload_id` (UUID), `nonce` (32 chars random URL-safe), `bearer_for_upload` (32 chars random URL-safe). Computar `upload_bearer_hash = SHA-256(bearer_for_upload).hex()` |
 | 4 | Construir `upload_url`: `<BASE_URL>/api/upload?session=<nonce>` (audio) o `/api/upload-image?session=<nonce>` (image) |
-| 5 | INSERT upload_sessions (id=upload_id, user_id, bearer_id, nonce, kind, transcription_id?, expected_size_bytes, expected_mime_type?, expires_at = now() + 10 min, status='requested') |
+| 5 | INSERT upload_sessions (id=upload_id, user_id, bearer_id, nonce, **upload_bearer_hash**, kind, transcription_id?, expected_size_bytes, expected_mime_type?, expires_at = now() + 10 min, status='requested'). El plaintext `bearer_for_upload` NUNCA se persiste — solo su hash. |
 | 6 | Emitir log `upload_url_requested(user_id, upload_id, kind)` |
-| 7 | Responder `{upload_url, upload_id, bearer: bearer_for_upload, expires_at}` |
+| 7 | Responder `{upload_url, upload_id, bearer: bearer_for_upload, expires_at}`. El plaintext se entrega UNA SOLA VEZ al cliente MCP; si lo pierde, debe pedir un nuevo `request_upload_url`. |
 
 ### Typed Errors
 
@@ -316,7 +316,7 @@ Scenario: Upload de otro user
 | 1 | Recibir multipart `file` + query `session=<nonce>` + header `Authorization: Bearer <upload_bearer>` |
 | 2 | SELECT upload_sessions WHERE nonce=? AND status='requested' |
 | 3 | Validar `now < expires_at` |
-| 4 | Validar `Authorization` bearer match con el `bearer_for_upload` registrado |
+| 4 | Validar `Authorization` bearer: computar `received_hash = SHA-256(plaintext del header).hex()` y comparar (constant-time, e.g. `hmac.compare_digest`) contra `upload_sessions.upload_bearer_hash`. Si no matchea: `MCP_BEARER_INVALID` (401). |
 | 5 | Validar tamaño del archivo recibido ≤ `expected_size_bytes * 1.05` (margen 5%) |
 | 6 | Si `kind='audio'`: guardar binario en `<DATA_DIR>/uploads/<upload_id>/original.bin` |
 | 7 | Si `kind='image'`: validar mime real (file magic bytes) coincide con `expected_mime_type`; INSERT `images (transcription_id, user_id, filename, mime_type, size_bytes, file_path)`; mover binario a `<DATA_DIR>/blobs/<user_id>/<transcription_id>/<image_id>.<ext>` |

@@ -119,7 +119,7 @@ Scenario: Mime no permitido
 | 2 | SELECT upload_sessions WHERE nonce=? AND status='requested' AND kind='image' |
 | 3 | Si no encontrada: `UPLOAD_SESSION_NOT_FOUND` |
 | 4 | Validar `now < expires_at` |
-| 5 | Validar bearer match con `bearer_for_upload` |
+| 5 | Validar bearer: computar `received_hash = SHA-256(plaintext del header `Authorization: Bearer <plaintext>`).hex()` y comparar (constant-time, e.g. `hmac.compare_digest`) contra `upload_sessions.upload_bearer_hash`. Si no matchea: `MCP_BEARER_INVALID` (401). |
 | 6 | Leer primeros bytes del archivo, detectar mime real con file-magic (ej. `python-magic`) |
 | 7 | Si mime real ≠ `expected_mime_type`: `INVALID_FORMAT` (400) |
 | 8 | Validar tamaño total ≤ `expected_size_bytes * 1.05` |

@@ -138,7 +138,7 @@ sequenceDiagram
 | Motor de Transcripción | Whisper large-v3 vía WhisperX | Modelo en VRAM | GPU, modelos en `/data/models/` |
 | Motor de Diarización | pyannote 3.1 | Modelo en VRAM | GPU, HF token |
 | Ensamblador | Asignar palabras a hablantes | Stateless | WhisperX util |
-| Caché Filesystem | Idempotencia 24h por audio_hash | `/data/cache/<hash>/` | Disco |
+| Caché Filesystem | Idempotencia 24h per-user por `(user_id, audio_hash)` (D-027) | `/data/cache/<user_id>/<audio_hash>/result.json` | Disco |
 | PostgreSQL 16 | Datos persistentes con identidad | `users`, `oauth_tokens`, `transcriptions`, `transcription_history`, `images`, `upload_sessions` | Volumen Docker |
 | Cleanup Job | Purga caché vencido | Stateless | Caché |
 
@@ -148,8 +148,8 @@ sequenceDiagram
 |---|---|---|---|---|
 | API HTTP | FastAPI 0.115 + Uvicorn 0.32 | Estándar Python; async; OpenAPI; compatible con MCP SDK (Simplicidad) | Versión Python con CUDA wheels específica | Pinear 3.10/3.11 en Dockerfile |
 | MCP Server | `mcp` SDK Anthropic + auth middleware custom | Único SDK oficial; transport streamable HTTP integrado | SDK joven, breaking changes posibles | Pinear versión; tests de contrato |
-| STT | WhisperX 3.8.5 + Whisper large-v3 (int8_float16) | Framework con diarización integrada (Simplicidad); calidad probada en español; cuantización requerida por VRAM 8 GB del rig ([ADR-001](ADR/ADR-001.md)) | Mejora marginal vs Canary; ~+0,5pp WER por cuantización | Validación empírica Capa 4 |
-| Diarización | pyannote 3.1 | Multilingüe maduro; integra WhisperX ([ADR-002](ADR/ADR-002.md)) | Requiere HF token | Aceptar términos en Fase 0 |
+| STT | WhisperX 3.8.5 + Whisper large-v3 (int8_float16) | Framework con diarización integrada (Simplicidad); calidad probada en español; cuantización requerida por VRAM 8 GB del rig ([ADR-001](ADR/ADR-001.md)) | Mejora marginal vs Canary; ~+0,5pp WER por cuantización | Validación empírica Capa 4. Loader lazy via indirección `_whisperx_load_model(...)` (D-030) — el módulo `pipeline.stt` es importable sin extras `[pipeline]` instalados; sólo invocar el loader requiere la lib pesada (testability + dev box CPU-only). |
+| Diarización | pyannote 3.1 | Multilingüe maduro; integra WhisperX ([ADR-002](ADR/ADR-002.md)) | Requiere HF token | Aceptar términos en Fase 0 (TRES modelos gated, ver [RF-TRX](RF/RF-TRX.md) §Prerrequisitos HF). Loader lazy via indirección `_pyannote_from_pretrained(...)` (D-028 + D-030) por el mismo motivo que STT. |
 | Audio | ffmpeg 6.x | Universal, todos los codecs (Simplicidad) | Codec raro falla | `-err_detect ignore_err` + tests con MP4 reales |
 | Caché efímero (24h) | Filesystem local | Sin dependencias; debug trivial ([ADR-004](ADR/ADR-004.md)) | TTL manual | Cleanup job |
 | Persistencia (users, history, tokens) | PostgreSQL 16 | Transacciones, queries SQL, JSONB ([ADR-008](ADR/ADR-008.md)) | Otro container | Healthcheck + volumen persistente |

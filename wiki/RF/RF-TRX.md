@@ -7,6 +7,15 @@
 
 > **Nota de versión 2.0**: estos RFs se ejecutan ahora orquestados por la tool MCP `start_transcription` ([RF-MCP-02](RF-MCP.md#rf-mcp-02-tool-start_transcription)), no directamente por HTTP REST. El input no es un upload multipart sino un `upload_id` previamente creado con `request_upload_url` ([RF-MCP-01](RF-MCP.md#rf-mcp-01-tool-request_upload_url)) y consumido por `POST /api/upload` ([RF-MCP-03](RF-MCP.md#rf-mcp-03-endpoint-rest-post-apiupload-audio--image)). Adicionalmente, tanto cache miss como cache hit persisten un registro en `transcriptions` (Postgres) asociado al `user_id` del bearer (ver [ADR-008](../ADR/ADR-008.md)). Los demás aspectos del módulo (lock, validación, errores GPU, persistencia tolerante) siguen vigentes.
 
+> **Nota de versión 2.1 (2026-05-06, D-026)**: Capa 3 introdujo un REST entry transitional `POST /api/transcriptions` (multipart en un solo request, bearer auth via `get_current_user_mcp`) como atajo de implementación previo a Capa 4 (MCP tools). El contrato canónico definido en estos RFs sigue siendo el flow MCP-driven (`request_upload_url` → `POST /api/upload` → `start_transcription`); el endpoint REST queda **deprecado en Capa 4** (marcar `deprecated=True` en OpenAPI) y será **removido en Capa 5**. La superficie REST normativa de v0.1 son los endpoints listados en RF-MCP-03 + RF-AUTH (auth flow web). Cualquier cliente nuevo debe usar la tool MCP, no el atajo REST.
+
+> **Prerrequisitos HF (D-042, 2026-05-06)**: pyannote.audio 4.x requiere `HF_TOKEN` con terms accept en **TRES** modelos (no dos como decía la versión 2.0):
+> 1. `pyannote/speaker-diarization-3.1` — pipeline principal.
+> 2. `pyannote/segmentation-3.0` — detector de actividad de voz interno.
+> 3. `pyannote/speaker-diarization-community-1` — contiene el PLDA artifact (`xvec_transform.npz`) usado internamente por la pipeline `speaker-diarization-3.1`. Es transitive dependency descubierta solo en runtime contra HF; no aparece en docs top-level del modelo principal.
+>
+> Sin terms accept en los tres, el lifespan log emite `pyannote_load_failed detail=terms_not_accepted` y `/health` reporta `pyannote.status="error"`. El operador debe visitar `huggingface.co/<modelo>` y aceptar cada uno antes del primer arranque.
+
 ## Tabla resumen
 
 | ID | Título | Actor | Pre-condición | Entradas | Salidas | Criterio de aceptación |
@@ -64,7 +73,7 @@
 | 4 | Ejecutar `ffmpeg -i upload.bin -vn -ac 1 -ar 16000 -sample_fmt s16 audio.wav` | Normalizador |
 | 5 | Calcular `sha256` del WAV → `audio_hash` (hex 64 chars) | Normalizador |
 | 6 | Emitir log `audio_normalized` con `duration_seconds`, `audio_hash`, `duration_ms` | Normalizador |
-| 7 | Lookup `<DATA_DIR>/cache/<audio_hash>/meta.json`. Si existe y `now - created_at < ttl_seconds`, ir a RF-TRX-02 | Caché |
+| 7 | Lookup `<DATA_DIR>/cache/<user_id>/<audio_hash>/meta.json`. Si existe y `now - created_at < ttl_seconds`, ir a RF-TRX-02 | Caché |
 | 8 | Emitir log `cache_lookup` con `hit=false` | FastAPI App |
 | 9 | Invocar WhisperX large-v3 sobre `audio.wav` con `language="es"`, batch_size configurable | Motor de Transcripción |
 | 10 | Emitir log `stt_completed` con `duration_ms`, `num_segments` | FastAPI App |
@@ -89,8 +98,8 @@
 |---|---|---|---|
 | HTTP 200 status | int | Cliente | Cliente sabe que el procesamiento fue exitoso. |
 | `TranscriptionResult` (JSON) | object | Cliente (HTTP body) | Cliente recibe transcripción diarizada completa. |
-| `<DATA_DIR>/cache/<audio_hash>/transcription.json` | file | Filesystem | Próxima request idéntica < 24h será cache hit (RF-TRX-02). |
-| `<DATA_DIR>/cache/<audio_hash>/meta.json` | file | Filesystem | Caché conoce el TTL para esta entrada. |
+| `<DATA_DIR>/cache/<user_id>/<audio_hash>/transcription.json` | file | Filesystem | Próxima request idéntica < 24h será cache hit (RF-TRX-02). |
+| `<DATA_DIR>/cache/<user_id>/<audio_hash>/meta.json` | file | Filesystem | Caché conoce el TTL para esta entrada. |
 | 9 eventos de log entre `request_received` y `request_completed` | structured logs | stdout JSON | Operador puede inspeccionar trazabilidad. |
 
 ### Typed Errors
@@ -109,6 +118,9 @@ Errores propios de RF-TRX-01:
 - **Audio con un único hablante**: pyannote puede retornar 1 speaker; el merge funciona normalmente.
 - **`language` distinto a `"es"`**: el sistema procesa, pero loguea WARN `non_spanish_language_used`.
 - **Hints `min_speakers > max_speakers`**: rechazo en validación (RF-TRX-03).
+- **`min_speakers` / `max_speakers` son HINTS, no requirements (D-040, 2026-05-06)**: ambos parámetros se forwardean a `pyannote.Pipeline.__call__(...)` como kwargs. Pyannote es la autoridad sobre el audio real: si el cliente manda `min_speakers=3` y pyannote genuinamente solo encuentra 1 speaker, el sistema acepta el 1 (no error, no re-run forzado). El cliente NO debe asumir que `min_speakers=N` garantiza N speakers en la salida. Para enforce estricto, el cliente debe verificar `response.num_speakers` y manejarlo en su lado. Razón: forzar el conteo no tiene mecanismo confiable en pyannote 3.1+ (sus modelos no exponen un parámetro "this audio MUST have N speakers"; los kwargs son guidance para el clustering interno).
+- **`max_speakers` cap por relabel, no por re-run (D-035)**: si pyannote detecta más speakers que `max_speakers`, el wrapper colapsa post-hoc por duración total (most-talkative wins) y relabela los segmentos del speaker descartado al top-N temporalmente más cercano. Una sola pasada por GPU. Speaker que habla < 1% del audio puede desaparecer en el resultado.
+- **`num_speakers` se cuenta desde merged segments (D-039)**: `num_speakers = |unique speakers en segments emitidos|`. Si pyannote detecta 3 speakers pero uno no recibe palabras de WhisperX (interjecciones cortas descartadas por el STT), `num_speakers` queda en 2. Matches el mental model "los hablantes que veo en la transcripción". Si en el futuro hace falta el conteo "verdadero" de pyannote, se expone como `metadata.diarized_speakers_count` sin tocar `num_speakers`.
 
 ### Data Model Impact
 
@@ -131,8 +143,8 @@ Scenario: Cache miss devuelve transcripción y persiste resultado
     And segments tiene al menos 1 elemento
     And metadata.audio_hash tiene 64 caracteres hexadecimales
     And metadata.cache_hit es false
-    And existe el archivo <DATA_DIR>/cache/<audio_hash>/transcription.json
-    And existe el archivo <DATA_DIR>/cache/<audio_hash>/meta.json
+    And existe el archivo <DATA_DIR>/cache/<user_id>/<audio_hash>/transcription.json
+    And existe el archivo <DATA_DIR>/cache/<user_id>/<audio_hash>/meta.json
     And el log estructurado contiene un evento request_completed con cache_hit=false
 
 Scenario: Audio sin habla
@@ -198,7 +210,7 @@ Scenario Outline: Diferentes formatos de entrada producen el mismo resultado
 | # | Condición | Verificación |
 |---|---|---|
 | 1 | Servicio FastAPI activo | `GET /health` retorna 200 |
-| 2 | Existe `<DATA_DIR>/cache/<audio_hash>/meta.json` | `os.path.exists` |
+| 2 | Existe `<DATA_DIR>/cache/<user_id>/<audio_hash>/meta.json` | `os.path.exists` |
 | 3 | Entrada de caché vigente | `now_utc() - parse_iso(meta.created_at) < timedelta(seconds=meta.ttl_seconds)` |
 | 4 | `meta.schema_version` igual a la versión actual del schema | `meta.schema_version == 1` |
 | 5 | `<audio_hash>/transcription.json` existe y es parseable | JSON load no lanza excepción |
@@ -649,7 +661,7 @@ Scenario: Recuperación tras OOM
 
 | # | Paso | Componente responsable |
 |---|---|---|
-| 1 | Intentar `os.makedirs(<DATA_DIR>/cache/<audio_hash>/, exist_ok=True)` | Caché |
+| 1 | Intentar `os.makedirs(<DATA_DIR>/cache/<user_id>/<audio_hash>/, exist_ok=True)` | Caché |
 | 2 | Escribir `transcription.json.tmp` y `meta.json.tmp` | Caché |
 | 3 | `os.rename` ambos a su nombre final (atómico) | Caché |
 | 4 | Emitir log `cache_persisted` con `bytes_written` | Caché |
@@ -675,7 +687,7 @@ No genera errores HTTP; sólo logs WARN. Ver §Special Cases.
 
 ### Data Model Impact
 
-- En caso normal: crea `TranscriptionResult` y `CacheMeta` en `<DATA_DIR>/cache/<audio_hash>/`.
+- En caso normal: crea `TranscriptionResult` y `CacheMeta` en `<DATA_DIR>/cache/<user_id>/<audio_hash>/`.
 - En caso de fallo: estado del caché no cambia.
 
 ### Expanded Acceptance Criteria (Gherkin)
