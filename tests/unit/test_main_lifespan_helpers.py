@@ -204,3 +204,96 @@ def test_read_magic_head_bounded_to_64_bytes(tmp_path):
     head = _read_magic_head(big)
     assert head == b"X" * _MAGIC_HEAD_BYTES
     assert len(head) == _MAGIC_HEAD_BYTES
+
+
+# ---------------------------------------------------------------------------
+# SD-3 — _sha256_wav_pcm hashes only the PCM data chunk.
+# ---------------------------------------------------------------------------
+def _build_wav(pcm_bytes: bytes, *, extra_chunks: list[tuple[bytes, bytes]] | None = None) -> bytes:
+    """Synthesize a minimal RIFF/WAVE blob.
+
+    ``extra_chunks`` are additional ``(chunk_id, chunk_body)`` pairs
+    inserted between the ``fmt `` chunk and the ``data`` chunk — used
+    to simulate ffmpeg writing LIST INFO / bext / JUNK metadata that
+    SD-3 must NOT include in the hash.
+    """
+    # WAV PCM fmt chunk body (16 bytes):
+    #   format=PCM(1), channels=1, sr=16000, byte_rate=32000,
+    #   block_align=2, bits_per_sample=16
+    fmt_body = (
+        b"\x01\x00"
+        b"\x01\x00"
+        b"\x80\x3e\x00\x00"
+        b"\x00\x7d\x00\x00"
+        b"\x02\x00"
+        b"\x10\x00"
+    )
+    fmt_chunk = b"fmt " + len(fmt_body).to_bytes(4, "little") + fmt_body
+
+    extras_blob = b""
+    for chunk_id, body in extra_chunks or []:
+        if len(body) % 2 == 1:
+            body = body + b"\x00"
+        extras_blob += chunk_id + len(body).to_bytes(4, "little") + body
+
+    data_chunk = b"data" + len(pcm_bytes).to_bytes(4, "little") + pcm_bytes
+
+    riff_body = b"WAVE" + fmt_chunk + extras_blob + data_chunk
+    riff_size = len(riff_body)  # excludes "RIFF" + size itself
+    return b"RIFF" + riff_size.to_bytes(4, "little") + riff_body
+
+
+def test_sha256_wav_pcm_ignores_metadata_chunks(tmp_path):
+    """
+    Spec: SPEC-capa3-pipeline-v1
+    Criterion: SD-3 — Two WAVs with identical PCM but different metadata
+    sub-chunks (LIST INFO, JUNK) MUST hash to the same digest.
+    """
+    from transcription_api.pipeline.normalize import _sha256_wav_pcm
+
+    pcm = b"\x12\x34" * 1024  # arbitrary 2 KB of PCM samples
+
+    wav_clean = _build_wav(pcm)
+    wav_with_meta = _build_wav(
+        pcm,
+        extra_chunks=[
+            (b"LIST", b"INFO" + b"INAM\x08\x00\x00\x00title!!!"),
+            (b"JUNK", b"\x00" * 32),
+        ],
+    )
+
+    a = tmp_path / "clean.wav"
+    b = tmp_path / "with_meta.wav"
+    a.write_bytes(wav_clean)
+    b.write_bytes(wav_with_meta)
+
+    assert _sha256_wav_pcm(a) == _sha256_wav_pcm(b), (
+        "audio_hash drifted across metadata-chunk variants — SD-3 broken"
+    )
+
+
+def test_sha256_wav_pcm_differs_when_pcm_differs(tmp_path):
+    """SD-3 sanity: different PCM bytes still yield different hashes."""
+    from transcription_api.pipeline.normalize import _sha256_wav_pcm
+
+    a = tmp_path / "a.wav"
+    b = tmp_path / "b.wav"
+    a.write_bytes(_build_wav(b"\x00" * 1024))
+    b.write_bytes(_build_wav(b"\xff" * 1024))
+
+    assert _sha256_wav_pcm(a) != _sha256_wav_pcm(b)
+
+
+def test_sha256_wav_pcm_falls_back_to_full_file_for_non_wav(tmp_path):
+    """A non-WAV input falls back to ``_sha256_file`` (defensive — guards
+    tests that pass binary blobs and any future caller mishaps)."""
+    import hashlib
+
+    from transcription_api.pipeline.normalize import _sha256_wav_pcm
+
+    raw = b"\x00\x01\x02" * 100
+    target = tmp_path / "not-a-wav.bin"
+    target.write_bytes(raw)
+
+    expected = hashlib.sha256(raw).hexdigest()
+    assert _sha256_wav_pcm(target) == expected

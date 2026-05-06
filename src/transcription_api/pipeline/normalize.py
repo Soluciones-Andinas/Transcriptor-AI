@@ -63,11 +63,69 @@ def _sha256_file(path: Path) -> str:
     CR-3: previously ``hashlib.sha256(path.read_bytes()).hexdigest()`` held
     the entire file in RAM. For a 2 h WAV (~230 MB) that's an avoidable
     spike; the chunked variant keeps working set bounded.
+
+    Note: this hashes the FULL file including any RIFF metadata chunks
+    written by ffmpeg. Use ``_sha256_wav_pcm`` for normalize's audio_hash
+    so the cache key stays stable across ffmpeg versions (SD-3).
     """
     h = hashlib.sha256()
     with path.open("rb") as fp:
         while chunk := fp.read(_SHA256_CHUNK_BYTES):
             h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha256_wav_pcm(path: Path) -> str:
+    """Stream-hash ONLY the PCM 'data' chunk of a WAV file.
+
+    SD-3: ffmpeg may write LIST INFO, bext, JUNK, or other RIFF
+    sub-chunks alongside the audio data. Hashing the whole file makes
+    ``audio_hash`` ffmpeg-version-dependent — a Docker rebuild that
+    bumps ffmpeg invalidates every existing cache entry without the
+    PCM bytes having changed. By isolating the ``data`` chunk we get
+    a content-only hash that is stable across ffmpeg versions.
+
+    Algorithm:
+    1. Read the 12-byte RIFF header. If not a canonical RIFF/WAVE,
+       fall back to ``_sha256_file`` (defensive — covers tests that
+       pass non-WAV files and unexpected ffmpeg outputs).
+    2. Walk the RIFF sub-chunks. Each starts with 8 bytes:
+       ``<chunk_id (4)><chunk_size_le (4)>``.
+    3. When ``chunk_id == b"data"``, hash exactly ``chunk_size`` bytes
+       (in 64 KB blocks) and return.
+    4. Otherwise skip the chunk (pad to even byte boundary per RIFF
+       spec) and continue. Tolerate truncation gracefully.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as fp:
+        riff = fp.read(12)
+        if len(riff) < 12 or riff[:4] != b"RIFF" or riff[8:12] != b"WAVE":
+            # Not a WAV (or truncated) — fall back to full-file hash.
+            fp.seek(0)
+            while chunk := fp.read(_SHA256_CHUNK_BYTES):
+                h.update(chunk)
+            return h.hexdigest()
+
+        # Walk sub-chunks until we find "data" (or run out of file).
+        while True:
+            header = fp.read(8)
+            if len(header) < 8:
+                break
+            chunk_id = header[:4]
+            chunk_size = int.from_bytes(header[4:8], "little")
+            if chunk_id == b"data":
+                remaining = chunk_size
+                while remaining > 0:
+                    block = fp.read(min(_SHA256_CHUNK_BYTES, remaining))
+                    if not block:
+                        break
+                    h.update(block)
+                    remaining -= len(block)
+                # Canonical WAV has one data chunk; stop here.
+                break
+            # Non-data chunks: skip the body (RIFF spec pads to even).
+            skip = chunk_size + (chunk_size & 1)
+            fp.seek(skip, 1)
     return h.hexdigest()
 
 
@@ -252,8 +310,10 @@ def normalize_audio(src: Path, output_dir: Path) -> tuple[Path, str, float]:
             f"ffmpeg exceeded {_FFMPEG_TIMEOUT_SECONDS}s timeout"
         ) from exc
 
-    # CR-3: streaming SHA-256 instead of read_bytes() (avoids loading full WAV).
-    audio_hash = _sha256_file(out_path)
+    # SD-3: hash ONLY the PCM data chunk so audio_hash is stable across
+    # ffmpeg versions. Fallback to full-file hash for non-WAV inputs is
+    # built into ``_sha256_wav_pcm`` (defense for tests / future changes).
+    audio_hash = _sha256_wav_pcm(out_path)
 
     try:
         duration = _probe_duration_seconds(out_path)

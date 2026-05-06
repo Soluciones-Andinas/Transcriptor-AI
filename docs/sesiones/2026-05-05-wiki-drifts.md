@@ -692,6 +692,120 @@ leyendo código.
 
 ---
 
+### D-038 🟢 Capa 3 review SD-3: audio_hash es del PCM puro, no del WAV completo
+
+**Asumido (implementación inicial Batch 2)**: `audio_hash = SHA-256(WAV bytes)` —
+hashea el output completo de ffmpeg incluyendo el header RIFF + cualquier
+sub-chunk de metadata que ffmpeg emita (LIST INFO, JUNK, bext, …).
+
+**Reality detectada en review (R1:M-9)**: ffmpeg cambia los metadata chunks
+entre versiones. Un `docker compose build --no-cache` que sube ffmpeg
+0.4.x → 0.5.x invalida TODO el cache filesystem aunque las muestras PCM
+sean idénticas. Resultado: el cache es ffmpeg-version-dependent.
+
+**Resolución (commit que cierra G6)**: nueva función
+`_sha256_wav_pcm(path)` que parsea el RIFF y hashea SOLO el cuerpo del
+chunk `data`. Fallback al full-file hash si el archivo no es RIFF/WAVE
+(defense para tests + edge cases). El cache key queda estable a través
+de upgrades de ffmpeg.
+
+**Decisión Franco**: PCM puro (default propuesto, confirmado).
+
+**Trade-off documentado**: la función es ~30 LOC más que el hash full-file,
+pero ahorra invalidaciones de cache enteras. La complejidad vive en el
+parser RIFF, que es estándar y bien-documentado.
+
+**Lección**: hashes derivados de archivos generados deben hashear el
+contenido SEMÁNTICO (PCM samples), no la representación física (header +
+chunks). Cualquier metadata-by-side-effect (timestamps, version strings,
+encoder name) hace el hash inestable a través de upgrades.
+
+---
+
+### D-039 🟢 Capa 3 review SD-4: num_speakers se cuenta desde merged segments
+
+**Asumido (implementación Batch 5)**: `num_speakers = len({seg.speaker for seg in merged_segments if seg.speaker})`.
+
+**Ambigüedad detectada en review (R1:M-1)**: si pyannote detecta 3 speakers
+pero uno no recibe palabras de Whisper (e.g., "ah" o "mm" muy corto que
+WhisperX descartó), `num_speakers` queda en 2 — no en 3.
+
+**Decisión Franco**: mantener desde merged segments (default propuesto).
+Razón: matches el mental model del user "los hablantes que veo en la
+transcripción", no el conteo interno de pyannote.
+
+**Implicación**: si un futuro requirement pide "número real de speakers
+detectados por pyannote" (e.g., para reporting), agregar un campo
+adicional `metadata.diarized_speakers_count` sin tocar `num_speakers`.
+
+**Acción pendiente**: ninguna — comportamiento actual es el deseado;
+documentación de la ambigüedad cierra el drift.
+
+**Lección**: cuando dos sources of truth divergen ligeramente, decidir
+explícitamente cuál se expone en el contrato público y mantener el
+otro disponible si se necesita downstream.
+
+---
+
+### D-040 🟢 Capa 3 review SD-5: min_speakers se forwardea a pyannote como hint, no se enforce
+
+**Asumido (implementación Batch 4)**: `min_speakers` y `max_speakers` se
+pasan a `pyannote.Pipeline.__call__(...)` como kwargs y respetan lo que
+pyannote devuelva.
+
+**Ambigüedad detectada en review (R1:M-5, R3:M-3)**: si el cliente manda
+`min_speakers=3` y pyannote devuelve solo 1 (porque genuinamente no
+puede encontrar más en el audio), ¿error o aceptar? El spec no especifica.
+
+**Decisión Franco**: forwardear como hint, aceptar lo que pyannote
+devuelva (default propuesto). Razón: forzar el conteo no tiene
+mecanismo confiable; pyannote es la autoridad sobre el audio real.
+
+**Implicación**: el cliente NO debe asumir que `min_speakers=N` garantiza
+N speakers en la salida. Es un hint, no un constraint.
+
+**Acción pendiente**: ninguna en código. Vale la pena documentar este
+contrato en RF-TRX wiki post-merge para que clientes futuros lo sepan
+sin leer drift logs.
+
+**Lección**: hints externos nunca son enforced strict en presencia de
+constraints físicos del input. El contrato debe ser claro sobre hint
+vs requirement.
+
+---
+
+### D-041 🟢 Capa 3 review SD-6: audio silente se cachea (resultado vacío canónico)
+
+**Asumido (implementación Batch 5)**: cuando STT retorna `segments: []`
+(audio puro silencio), el orchestrator persiste un row + cache file con
+`text_content: ""`, `num_speakers: 0`, `metadata.silent_audio: true`.
+
+**Ambigüedad detectada en review (R1:M-6)**: ¿cachear audio silente o
+no? Trade-off:
+- Cachear: el segundo upload del mismo archivo silente se sirve desde
+  cache (~5s ahorrados).
+- No cachear: el cliente puede re-grabar (e.g., arregló el mic) y la
+  segunda corrida re-procesa.
+
+**Decisión Franco**: cachear (default propuesto). Razón: Privacy no
+cambia (el cache sigue siendo per-user, D-027); Performance gana sin
+costo. El cliente que re-grabe va a tener un `audio_hash` distinto
+porque las muestras PCM cambian — el hash del silencio "real" del mic1
+no colisiona con el hash del silencio "real" del mic2.
+
+**Implicación**: la entrada `metadata.silent_audio: true` en el cache
+es informativa pero no afecta el comportamiento del cache hit.
+
+**Acción pendiente**: ninguna — comportamiento implementado matches
+la decisión.
+
+**Lección**: cuando el cache key es derivado del contenido (PCM hash,
+SD-3), las "categorías" del contenido (silente, multi-speaker, etc.)
+pueden cachearse uniformemente sin lógica especial. El hash hace el
+distinguishing.
+
+---
+
 ### D-034 🟢 Capa 3 Batch 3: `stt.transcribe` retorna dict canónico, no `list[Segment]`
 
 **Asumido (`docs/sesiones/2026-05-05-capa3-pipeline-plan.md` Task 3.1 RED)**:
