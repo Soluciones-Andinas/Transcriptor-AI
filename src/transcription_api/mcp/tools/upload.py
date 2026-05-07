@@ -26,10 +26,10 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
+from ...auth.mcp_bearer import hash_bearer
 from ...config import settings
 from ...db.models import Transcription, UploadSession
 from ..errors import raise_tool_error
@@ -154,9 +154,7 @@ async def request_upload_url(
         upload_id = uuid4()
         nonce = secrets.token_urlsafe(32)
         bearer_for_upload = secrets.token_urlsafe(32)
-        upload_bearer_hash = sha256(
-            bearer_for_upload.encode("ascii")
-        ).hexdigest()
+        upload_bearer_hash = hash_bearer(bearer_for_upload)
         expires_at = datetime.now(timezone.utc) + timedelta(
             seconds=settings.upload_session_ttl_seconds
         )

@@ -27,7 +27,6 @@ import hmac
 import imghdr
 import logging
 from datetime import datetime, timezone
-from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
@@ -43,6 +42,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth.header import parse_bearer
+from ..auth.mcp_bearer import hash_bearer
 from ..config import settings
 from ..db import get_session
 from ..db.models import Image, UploadSession
@@ -70,16 +71,12 @@ async def upload_audio(
     """Chunked-upload endpoint for audio binaries (RF-MCP-03)."""
 
     # ------------------------------------------------------------------
-    # 1. Bearer parse — fast-fail before any DB hit.
+    # 1. Bearer parse — fast-fail before any DB hit (G7 single source).
     # ------------------------------------------------------------------
-    if not authorization or not authorization.lower().startswith("bearer "):
+    plaintext = parse_bearer(authorization)
+    if plaintext is None:
         return _error_resp(
             401, "MCP_BEARER_INVALID", "missing or malformed Authorization header"
-        )
-    plaintext = authorization[len("Bearer ") :].strip()
-    if not plaintext:
-        return _error_resp(
-            401, "MCP_BEARER_INVALID", "empty bearer token"
         )
 
     # ------------------------------------------------------------------
@@ -124,7 +121,7 @@ async def upload_audio(
     # 4. Bearer match — hmac.compare_digest is constant-time to thwart
     #    timing oracles on the sha256 hex comparison.
     # ------------------------------------------------------------------
-    received_hash = sha256(plaintext.encode("ascii")).hexdigest()
+    received_hash = hash_bearer(plaintext)
     if not hmac.compare_digest(received_hash, row.upload_bearer_hash):
         return _error_resp(
             401, "MCP_BEARER_INVALID", "bearer hash mismatch"
@@ -226,14 +223,12 @@ async def upload_image(
     under ``DATA_DIR/blobs/<user_id>/<transcription_id>/<image_id>.<ext>``.
     """
 
-    # 1. Bearer parse — fast-fail before any DB hit.
-    if not authorization or not authorization.lower().startswith("bearer "):
+    # 1. Bearer parse — fast-fail before any DB hit (G7 single source).
+    plaintext = parse_bearer(authorization)
+    if plaintext is None:
         return _error_resp(
             401, "MCP_BEARER_INVALID", "missing or malformed Authorization header"
         )
-    plaintext = authorization[len("Bearer ") :].strip()
-    if not plaintext:
-        return _error_resp(401, "MCP_BEARER_INVALID", "empty bearer token")
 
     # 2. Lookup upload session by nonce (cross-user — listener bypass).
     with bypass_scoping(db):
@@ -263,8 +258,8 @@ async def upload_image(
             f"endpoint expects kind='image', session has kind={row.kind!r}",
         )
 
-    # 4. Bearer match (constant-time hex compare).
-    received_hash = sha256(plaintext.encode("ascii")).hexdigest()
+    # 4. Bearer match (constant-time hex compare; G7 hash_bearer single source).
+    received_hash = hash_bearer(plaintext)
     if not hmac.compare_digest(received_hash, row.upload_bearer_hash):
         return _error_resp(401, "MCP_BEARER_INVALID", "bearer hash mismatch")
 

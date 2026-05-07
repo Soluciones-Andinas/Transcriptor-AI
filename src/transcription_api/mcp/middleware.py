@@ -39,6 +39,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ..auth.header import parse_bearer
 from ..auth.mcp_bearer import hash_bearer
 from ..db.models import McpBearer
 from ..db.scoping import bypass_scoping
@@ -165,14 +166,16 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 "MCP_BEARER_INVALID", "missing Authorization header"
             )
 
-        parts = auth_header.split(" ", 1)
-        if len(parts) != 2 or parts[0].lower() != "bearer":
+        # G7 review-fix — single-source bearer parser. Returns None on
+        # both missing-scheme and empty-plaintext, which the middleware
+        # surfaces as MCP_BEARER_INVALID (same body either cause).
+        plaintext = parse_bearer(auth_header)
+        if plaintext is None:
             return _unauthorized_response(
                 "MCP_BEARER_INVALID",
                 "Authorization header must be `Bearer <token>`",
             )
 
-        plaintext = parts[1].strip()
         try:
             user_id, bearer_id = await _authenticate(plaintext)
         except McpAuthError as exc:
