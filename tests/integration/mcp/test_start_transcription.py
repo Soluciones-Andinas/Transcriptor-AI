@@ -765,3 +765,109 @@ async def test_start_transcription_honors_grace_window(
     finally:
         reset_ctx()
         reset_models()
+
+
+# ---------------------------------------------------------------------------
+# G11.5 — AC-9 real concurrency via asyncio.gather + lock contention
+# ---------------------------------------------------------------------------
+async def test_concurrent_start_transcription_serializes_via_gpu_lock(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-9 (G11 review-fix) — Given two concurrent
+    start_transcription calls (different upload sessions, same user),
+    When both run via ``asyncio.gather``, Then the
+    process-wide ``_orchestrator_lock`` serializes them: one succeeds
+    and the other surfaces ``LOCK_BUSY`` after exhausting
+    ``lock_wait_seconds``. Strengthens the prior unit-level test that
+    only asserted ``GPUBusy -> LOCK_BUSY`` mapping with a mock
+    side-effect; this one drives the real lock primitive.
+    """
+    import asyncio
+
+    from transcription_api.mcp.tools.start import start_transcription
+    from transcription_api.pipeline.orchestrator import (
+        GPUBusy,
+        _orchestrator_lock,
+    )
+
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    # Tight grace so the second call's timeout is fast.
+    monkeypatch.setattr(
+        "transcription_api.config.settings.lock_wait_seconds", 0.3
+    )
+
+    user, bearer, upload_a = await _seed_user_bearer_upload(
+        session, email_suffix="conc-a"
+    )
+    # Reuse the same user + bearer for the second upload so both
+    # invocations share the listener-armed scope.
+    plain_b = secrets.token_urlsafe(32)
+    hash_b = sha256(plain_b.encode("ascii")).hexdigest()
+    from tests.factories import make_upload_session
+    from transcription_api.db.models import UploadSession
+
+    upload_b = await make_upload_session(
+        session,
+        user_id=user.id,
+        bearer_id=bearer.id,
+        kind="audio",
+        expected_size_bytes=1024,
+        upload_bearer_hash=hash_b,
+    )
+    await session.execute(
+        UploadSession.__table__.update()
+        .where(UploadSession.id == upload_b.id)
+        .values(status="uploaded", uploaded_at=datetime.now(timezone.utc))
+    )
+    await session.commit()
+    _stage_upload_file(tmp_path, upload_a.id)
+    _stage_upload_file(tmp_path, upload_b.id)
+
+    # Mock orchestrate to mimic the real lock-acquire/sleep/release
+    # cycle so the contention is genuine. The real orchestrate body is
+    # GPU-heavy and not testable here, but the lock primitive IS the
+    # contract under test.
+    async def fake_orchestrate(**kwargs):
+        try:
+            await asyncio.wait_for(
+                _orchestrator_lock.acquire(), timeout=0.3
+            )
+        except asyncio.TimeoutError as exc:
+            raise GPUBusy(retry_after=600) from exc
+        try:
+            await asyncio.sleep(1.0)
+            return _orchestrator_result()
+        finally:
+            if _orchestrator_lock.held_by_current_task():
+                _orchestrator_lock.release()
+
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.start.orchestrate", fake_orchestrate
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        results = await asyncio.gather(
+            start_transcription(upload_id=str(upload_a.id)),
+            start_transcription(upload_id=str(upload_b.id)),
+            return_exceptions=True,
+        )
+    finally:
+        reset_ctx()
+        reset_models()
+
+    successes = [r for r in results if isinstance(r, dict)]
+    failures = [r for r in results if isinstance(r, Exception)]
+    assert len(successes) == 1, (
+        f"expected exactly 1 successful call; got {len(successes)} "
+        f"successes / {len(failures)} failures"
+    )
+    assert len(failures) == 1
+    assert _is_tool_error(failures[0], "LOCK_BUSY"), (
+        f"second call must surface LOCK_BUSY; got {failures[0]!r}"
+    )
