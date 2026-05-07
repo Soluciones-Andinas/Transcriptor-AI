@@ -9,6 +9,7 @@ Covers (G6 — review-fixes Tier 2 split):
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -19,6 +20,8 @@ from ..errors import raise_tool_error
 from ..middleware import get_current_user_id
 from ..server import mcp_server
 from ..session import mcp_request_session
+
+logger = logging.getLogger("transcription_api.mcp.tools.delete")
 
 
 @mcp_server.tool(name="delete_transcription")
@@ -70,13 +73,23 @@ async def delete_transcription(transcription_id: str) -> dict[str, Any]:
         # `get_transcription` of the deleted parent never returns its
         # (now-orphan) images. Image carries user_id denormalized so
         # the listener applies the same scoping here.
-        await db.execute(
+        cascade = await db.execute(
             update(Image)
             .where(
                 Image.transcription_id == tid,
                 Image.deleted_at.is_(None),
             )
             .values(deleted_at=func.now())
+        )
+        # G8.5 — surface the cascade size so an audit trail can spot a
+        # transcription that ended up with abnormally many image rows
+        # (e.g., a runaway attachment loop). 0 is the common case for
+        # transcriptions that never had images attached.
+        logger.info(
+            "delete_cascade_images user_id=%s transcription_id=%s rowcount=%d",
+            user_id,
+            tid,
+            cascade.rowcount,
         )
 
     return {"ok": True}
