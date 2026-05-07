@@ -20,6 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # Settings validates at import time (D-011 / Capa 2 review-fix CR-2):
+    # JWT_SECRET >= 32 chars and OAUTH_TOKEN_ENC_KEY decodes to exactly
+    # 32 bytes (AES-256-GCM key). pytest collection fails without them.
+    # These are TEST-ONLY values, deliberately fixed and obviously fake;
+    # they are NOT production secrets. Production values come from the
+    # rig's `.env` file (never committed).
+    env:
+      JWT_SECRET: ci-test-jwt-secret-do-not-use-in-prod-padding-padding
+      OAUTH_TOKEN_ENC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
     steps:
       - uses: actions/checkout@v4
 
