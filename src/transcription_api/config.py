@@ -130,6 +130,12 @@ class Settings(BaseSettings):
     upload_session_grace_seconds: int = Field(
         default=300, alias="UPLOAD_SESSION_GRACE_SECONDS", ge=0
     )
+    # Capa 4 — TTL del upload session ephemeral (RF-MCP-01 step 6:
+    # `request_upload_url` setea `expires_at = now() + this`). Default 10 min,
+    # override per-deploy via UPLOAD_SESSION_TTL_SECONDS.
+    upload_session_ttl_seconds: int = Field(
+        default=600, alias="UPLOAD_SESSION_TTL_SECONDS", gt=0
+    )
 
     # --- Concurrencia (ADR-005) --------------------------------------------
     lock_wait_seconds: float = Field(default=5.0, alias="LOCK_WAIT_SECONDS", gt=0)

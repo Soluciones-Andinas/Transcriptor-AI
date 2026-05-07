@@ -54,6 +54,14 @@ logger = logging.getLogger("transcription_api.mcp.middleware")
 _current_user_id: ContextVar[UUID | None] = ContextVar(
     "_current_user_id", default=None
 )
+# Capa 4 Batch 2 — also expose the bearer row id so tools that persist
+# rows referencing ``mcp_bearers.id`` (notably ``upload_sessions.bearer_id``
+# in ``request_upload_url``) can read it from context instead of querying
+# the same row a second time. The middleware armed it during _authenticate,
+# so the tool body just calls ``get_current_bearer_id()``.
+_current_bearer_id: ContextVar[UUID | None] = ContextVar(
+    "_current_bearer_id", default=None
+)
 
 
 class McpAuthError(Exception):
@@ -78,8 +86,8 @@ def _unauthorized_response(code: str, reason: str) -> JSONResponse:
     )
 
 
-async def _authenticate(plaintext: str) -> UUID:
-    """Validate ``plaintext`` against ``mcp_bearers``; return ``user_id``.
+async def _authenticate(plaintext: str) -> tuple[UUID, UUID]:
+    """Validate ``plaintext`` against ``mcp_bearers``; return ``(user_id, bearer_id)``.
 
     Distinguishes invalid-or-unknown from revoked by querying without
     the ``revoked_at IS NULL`` filter that ``verify_bearer`` applies
@@ -89,6 +97,10 @@ async def _authenticate(plaintext: str) -> UUID:
     Side-effect: bumps ``last_used_at`` on the matched row (best-effort,
     per the H-6 pattern from Capa 2 — a transient DB hiccup on the
     bump must NOT 401 a valid request).
+
+    Capa 4 Batch 2: also returns ``bearer_id`` so the dispatch can arm
+    the ``_current_bearer_id`` ContextVar — tools that need to persist
+    ``mcp_bearers.id`` references read it from context.
     """
     if not plaintext:
         raise McpAuthError("MCP_BEARER_INVALID", "empty bearer token")
@@ -130,7 +142,7 @@ async def _authenticate(plaintext: str) -> UUID:
                 )
                 await session.rollback()
 
-            return row.user_id
+            return row.user_id, row.id
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
@@ -162,15 +174,17 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
         plaintext = parts[1].strip()
         try:
-            user_id = await _authenticate(plaintext)
+            user_id, bearer_id = await _authenticate(plaintext)
         except McpAuthError as exc:
             return _unauthorized_response(exc.code, exc.reason)
 
-        token = _current_user_id.set(user_id)
+        user_token = _current_user_id.set(user_id)
+        bearer_token = _current_bearer_id.set(bearer_id)
         try:
             return await call_next(request)
         finally:
-            _current_user_id.reset(token)
+            _current_user_id.reset(user_token)
+            _current_bearer_id.reset(bearer_token)
 
 
 def get_current_user_id() -> UUID:
@@ -189,3 +203,19 @@ def get_current_user_id() -> UUID:
             "current_user_id ContextVar unset (middleware not on path?)",
         )
     return uid
+
+
+def get_current_bearer_id() -> UUID:
+    """Read the ``mcp_bearers.id`` armed by the middleware.
+
+    Used by tools that persist FK references to the active bearer
+    (e.g., ``upload_sessions.bearer_id`` in ``request_upload_url``).
+    Same programming-error contract as ``get_current_user_id``.
+    """
+    bid = _current_bearer_id.get()
+    if bid is None:
+        raise McpAuthError(
+            "MCP_BEARER_INVALID",
+            "current_bearer_id ContextVar unset (middleware not on path?)",
+        )
+    return bid

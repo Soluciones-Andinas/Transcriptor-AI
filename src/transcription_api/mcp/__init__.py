@@ -17,6 +17,7 @@ the app — keep new tool modules added to the imports below.
 from .middleware import (
     BearerAuthMiddleware,
     McpAuthError,
+    get_current_bearer_id,
     get_current_user_id,
 )
 from .server import mcp_server
@@ -39,6 +40,7 @@ mcp_app.add_middleware(BearerAuthMiddleware)
 __all__ = [
     "BearerAuthMiddleware",
     "McpAuthError",
+    "get_current_bearer_id",
     "get_current_user_id",
     "mcp_app",
     "mcp_request_session",
