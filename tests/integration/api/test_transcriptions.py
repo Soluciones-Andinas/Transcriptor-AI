@@ -828,38 +828,44 @@ async def test_post_transcriptions_emits_legacy_warn_on_invocation(
         transcription_id=transcription_id, audio_hash="c" * 64
     )
 
-    # Force propagation on the parent `transcription_api` logger so caplog's
-    # root-level handler receives the WARN. Production `logging.json` sets
-    # `propagate=False` on `transcription_api` (uvicorn-loaded only), but
-    # tests bypassing uvicorn might still see propagate=False if a previous
-    # test or import side-effect set it. Be defensive.
-    parent_logger = logging.getLogger("transcription_api")
-    original_propagate = parent_logger.propagate
-    parent_logger.propagate = True
+    # Bulletproof capture: attach a Handler DIRECTLY to the logger that
+    # emits the WARN, bypassing pytest's caplog (which depends on root-
+    # propagation that breaks under various combinations of logging.json
+    # config + asgi-lifespan + pytest-asyncio loop creation order).
+    captured: list[logging.LogRecord] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    target_logger = logging.getLogger("transcription_api.api.transcriptions")
+    handler = _CaptureHandler(level=logging.WARNING)
+    prev_level = target_logger.level
+    target_logger.addHandler(handler)
+    target_logger.setLevel(logging.WARNING)
     try:
-        with caplog.at_level(logging.WARNING, logger="transcription_api.api.transcriptions"):
-            with patch(
-                "transcription_api.api.transcriptions.orchestrate",
-                new=AsyncMock(return_value=expected),
-            ):
-                r = await client.post(
-                    "/api/transcriptions",
-                    files={"file": ("x.mp3", io.BytesIO(b"ID3" + b"\x00" * 32), "audio/mpeg")},
-                    data={"language": "es"},
-                    headers={"authorization": f"Bearer {plaintext}"},
-                )
+        with patch(
+            "transcription_api.api.transcriptions.orchestrate",
+            new=AsyncMock(return_value=expected),
+        ):
+            r = await client.post(
+                "/api/transcriptions",
+                files={"file": ("x.mp3", io.BytesIO(b"ID3" + b"\x00" * 32), "audio/mpeg")},
+                data={"language": "es"},
+                headers={"authorization": f"Bearer {plaintext}"},
+            )
     finally:
-        parent_logger.propagate = original_propagate
+        target_logger.removeHandler(handler)
+        target_logger.setLevel(prev_level)
 
     assert r.status_code == 200, r.text
-    # Use caplog.text (rendered output) for robustness: works regardless of
-    # whether records have `.message` populated and whether the captured
-    # records are exposed as a list or only via the textual stream.
-    assert "legacy_endpoint_invoked" in caplog.text, (
-        f"expected WARN with 'legacy_endpoint_invoked'; caplog.text={caplog.text!r}"
+    msgs = [rec.getMessage() for rec in captured if rec.levelno == logging.WARNING]
+    assert any("legacy_endpoint_invoked" in m for m in msgs), (
+        f"expected WARN with 'legacy_endpoint_invoked'; got: {msgs!r}"
     )
-    assert "deprecated_endpoint=POST_/api/transcriptions" in caplog.text
-    assert "removal_target=Capa5" in caplog.text
+    full = next(m for m in msgs if "legacy_endpoint_invoked" in m)
+    assert "deprecated_endpoint=POST_/api/transcriptions" in full
+    assert "removal_target=Capa5" in full
 
 
 # H-9 / AC-9 — /health "loading" default surfaces when state attrs missing.
