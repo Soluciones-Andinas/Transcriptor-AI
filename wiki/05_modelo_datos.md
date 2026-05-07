@@ -383,6 +383,8 @@ Usados en respuestas HTTP/MCP de error y en el campo `error_code` de logs `*_fai
 | `LOCK_BUSY` | 503 | Lock global ocupado |
 | `CUDA_OOM` | 500 | GPU sin memoria |
 | `MODEL_FAILURE` | 500 | Crash no clasificado del modelo |
+| `MODELS_NOT_LOADED` | 503 | Whisper o pyannote no están en estado `ready` (lifespan startup pendiente o falló). Surface por RF-MCP-02 / RF-TRX. |
+| `PIPELINE_TIMEOUT` | 504 | Pipeline excedió `pipeline_timeout_seconds`. Surface por RF-MCP-02 / RF-TRX. |
 
 ### Recursos
 
