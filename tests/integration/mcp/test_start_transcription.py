@@ -104,8 +104,14 @@ def _arm_context(user_id: UUID, bearer_id: UUID):
 
 def _arm_models_ready():
     """Arm app.state with stub models so the tool's MODELS_NOT_LOADED gate
-    passes. Returns reset callable."""
+    passes. Returns reset callable.
+
+    G12 review-fix: also arms the runtime ContextVars (the same
+    snapshot the bearer middleware applies on a real request) so
+    direct-invocation tests don't need the middleware in the loop.
+    """
     from transcription_api.main import app
+    from transcription_api.mcp.runtime import arm_runtime_from_state
 
     prior = (
         getattr(app.state, "whisper_status", None),
@@ -117,12 +123,16 @@ def _arm_models_ready():
     app.state.pyannote_status = "ready"
     app.state.whisper_model = MagicMock(name="whisper_stub")
     app.state.pyannote_pipeline = MagicMock(name="pyannote_stub")
+    arm_runtime_from_state(app.state)
 
     def _reset():
         app.state.whisper_status = prior[0]
         app.state.pyannote_status = prior[1]
         app.state.whisper_model = prior[2]
         app.state.pyannote_pipeline = prior[3]
+        # Re-snapshot prior state so subsequent tests don't see this
+        # fixture's stubs through the ContextVars.
+        arm_runtime_from_state(app.state)
 
     return _reset
 

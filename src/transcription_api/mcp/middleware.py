@@ -196,6 +196,16 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         except McpAuthError as exc:
             return _unauthorized_response(exc.code, exc.reason)
 
+        # G12 review-fix — arm runtime ContextVars from the MAIN FastAPI
+        # app.state (where the lifespan landed the loaded models). The
+        # mounted MCP sub-app's ``request.app`` is NOT the main app, so
+        # we lazy-import once here. Tools then read via accessors and
+        # never have to reach for main.app themselves.
+        from ..main import app as _main_app  # lazy: avoids main <-> mcp cycle
+        from .runtime import arm_runtime_from_state
+
+        arm_runtime_from_state(_main_app.state)
+
         user_token = _current_user_id.set(user_id)
         bearer_token = _current_bearer_id.set(bearer_id)
         try:

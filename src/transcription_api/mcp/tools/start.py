@@ -141,23 +141,43 @@ async def start_transcription(
     """
     user_id = get_current_user_id()
 
-    # Models gate — short-circuit before opening a DB session if the
-    # lifespan never landed both models in 'ready'. Lazy import of
-    # main.app avoids the main <-> mcp circular import.
-    from ...main import app  # lazy: avoids main <-> mcp cycle
-    from ...runtime.readiness import check_models_ready
+    # Models gate — read the runtime snapshot armed by the bearer
+    # middleware (G12 review-fix). The middleware lazy-imports main.app
+    # exactly once per request and snapshots whisper / pyannote /
+    # readiness into ContextVars; this tool no longer touches main.app.
+    from ..runtime import get_runtime_models, get_runtime_status
 
-    readiness = check_models_ready(app.state)
-    if not readiness.ready:
+    status = get_runtime_status()
+    if status is None:
+        # Tool invoked outside a request flow that ran the middleware
+        # (e.g., a misconfigured test path). Surface as MODELS_NOT_LOADED
+        # rather than an AttributeError on a None app.state.
         raise_tool_error(
             "MODELS_NOT_LOADED",
-            f"{readiness.failing_model} model is not ready",
+            "runtime context not armed (middleware did not run)",
             503,
-            detail=readiness.detail,
+        )
+    if (
+        status["whisper_status"] != "ready"
+        or status["pyannote_status"] != "ready"
+    ):
+        # Whisper takes precedence on a double-fault to mirror the
+        # ``check_models_ready`` helper used by the REST endpoint
+        # (G2 dedupe stays in lock step).
+        if status["whisper_status"] != "ready":
+            failing = "whisper"
+            detail = status["whisper_detail"]
+        else:
+            failing = "pyannote"
+            detail = status["pyannote_detail"]
+        raise_tool_error(
+            "MODELS_NOT_LOADED",
+            f"{failing} model is not ready",
+            503,
+            detail=detail,
         )
 
-    whisper_model = app.state.whisper_model
-    pyannote_pipeline = app.state.pyannote_pipeline
+    whisper_model, pyannote_pipeline = get_runtime_models()
     cache_store = CacheStore(base_dir=settings.cache_dir)
 
     async with mcp_request_session(user_id) as db:
