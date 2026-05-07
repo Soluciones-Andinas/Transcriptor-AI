@@ -193,7 +193,7 @@ async def test_start_transcription_happy_path(session, monkeypatch, tmp_path):
     _stage_upload_file(tmp_path, upload.id)
     expected_tid = uuid4()
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(return_value=_orchestrator_result(transcription_id=expected_tid)),
     )
 
@@ -246,7 +246,7 @@ async def test_start_transcription_happy_passes_cache_hit_through(
     cached = _orchestrator_result()
     cached["metadata"]["cache_hit"] = True
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(return_value=cached),
     )
 
@@ -289,7 +289,7 @@ async def test_start_transcription_gpu_busy_returns_lock_busy(
     )
     _stage_upload_file(tmp_path, upload.id)
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(side_effect=GPUBusy(retry_after=600)),
     )
 
@@ -341,7 +341,7 @@ async def test_start_transcription_pipeline_timeout_returns_typed_error(
     )
     _stage_upload_file(tmp_path, upload.id)
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(side_effect=PipelineTimeout(timeout_seconds=1800)),
     )
 
@@ -386,7 +386,7 @@ async def test_start_transcription_returns_models_not_loaded_when_whisper_errore
 
     orchestrate_mock = AsyncMock(side_effect=AssertionError("must NOT be called"))
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         orchestrate_mock,
     )
 
@@ -432,7 +432,7 @@ async def test_start_transcription_already_consumed_returns_409(
     _stage_upload_file(tmp_path, upload.id)
     orchestrate_mock = AsyncMock(side_effect=AssertionError("must NOT call"))
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         orchestrate_mock,
     )
 
@@ -472,7 +472,7 @@ async def test_start_transcription_expired_session_returns_not_found(
     )
     _stage_upload_file(tmp_path, upload.id)
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(side_effect=AssertionError("must NOT call")),
     )
 
@@ -509,7 +509,7 @@ async def test_start_transcription_status_requested_returns_not_found(
         session, email_suffix="req", status="requested"
     )
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(side_effect=AssertionError("must NOT call")),
     )
 
@@ -552,7 +552,7 @@ async def test_start_transcription_cross_user_returns_not_found(
         session, email_suffix="bob"
     )
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(side_effect=AssertionError("must NOT call")),
     )
 
@@ -586,7 +586,7 @@ async def test_start_transcription_unknown_upload_id_returns_not_found(
         session, email_suffix="ghost"
     )
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(side_effect=AssertionError("must NOT call")),
     )
 
@@ -631,7 +631,7 @@ async def test_start_transcription_cleans_upload_dir_on_orchestrate_failure(
     assert upload_dir.exists()  # sanity — fixture staged the bytes
 
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate",
+        "transcription_api.mcp.tools.start.orchestrate",
         AsyncMock(side_effect=RuntimeError("simulated GPU crash")),
     )
 
@@ -676,7 +676,7 @@ async def test_start_transcription_passes_correct_kwargs_to_orchestrate(
     _stage_upload_file(tmp_path, upload.id)
     mock_orch = AsyncMock(return_value=_orchestrator_result())
     monkeypatch.setattr(
-        "transcription_api.mcp.tools.transcription.orchestrate", mock_orch
+        "transcription_api.mcp.tools.start.orchestrate", mock_orch
     )
 
     reset_ctx = _arm_context(user.id, bearer.id)

@@ -86,7 +86,10 @@ def test_purge_orphan_uploads_logs_unlink_failure(
         _main._purge_orphan_uploads()
 
     assert blocked.exists()  # not deleted
-    assert any("UPLOAD_ORPHAN_LEAK" in rec.message for rec in caplog.records)
+    # `rec.message` is only populated after a Formatter.format() call;
+    # `caplog.text` is the rendered text of all captured records and works
+    # consistently across pytest versions / handler configs.
+    assert "UPLOAD_ORPHAN_LEAK" in caplog.text
 
 
 # ---------------------------------------------------------------------------

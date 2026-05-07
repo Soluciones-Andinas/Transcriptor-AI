@@ -141,13 +141,41 @@ def migrated_db_url(pg_container: str) -> str:
 
 @pytest_asyncio.fixture
 async def engine(migrated_db_url: str):
-    """Per-test AsyncEngine pointed at the migrated testcontainer DB."""
-    from sqlalchemy.ext.asyncio import create_async_engine
+    """Per-test AsyncEngine pointed at the migrated testcontainer DB.
+
+    Also overrides ``transcription_api.db.session.engine`` and
+    ``async_session_factory`` so production code paths invoked directly
+    by tests (e.g. MCP tools that use ``scoped_session(user_id)``) hit
+    the testcontainer DB instead of the default ``POSTGRES_HOST=postgres``
+    which does not resolve on CI runners. Latent since Capa 2: tests
+    that invoke tools directly (no FastAPI client wrapper) used the
+    production module's engine, which only happened to work when the
+    dev box had ``POSTGRES_HOST`` pointing at the same testcontainer
+    via docker-compose. CI without that wiring exposed the gap.
+    """
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
 
     eng = create_async_engine(migrated_db_url, future=True)
+    factory = async_sessionmaker(bind=eng, expire_on_commit=False, class_=AsyncSession)
+
+    # Patch production module attributes so `scoped_session` (and any
+    # other call site reading these via name lookup at call time) uses
+    # the testcontainer engine. Snapshot + restore for hermetic teardown.
+    import transcription_api.db.session as _session_mod
+
+    _orig_engine = _session_mod.engine
+    _orig_factory = _session_mod.async_session_factory
+    _session_mod.engine = eng
+    _session_mod.async_session_factory = factory
     try:
         yield eng
     finally:
+        _session_mod.engine = _orig_engine
+        _session_mod.async_session_factory = _orig_factory
         await eng.dispose()
 
 
