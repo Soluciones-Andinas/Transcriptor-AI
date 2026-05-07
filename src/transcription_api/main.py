@@ -397,9 +397,15 @@ app.include_router(auth_router)
 # Capa 3 — wire the transcriptions API (POST + GET /api/transcriptions).
 # The router uses Depends(get_current_user_mcp) for bearer auth and
 # Depends(get_session) for the request-scoped DB session.
-from .api import transcriptions_router  # noqa: E402
+from .api import transcriptions_router, upload_router  # noqa: E402
 
 app.include_router(transcriptions_router)
+
+# Capa 4 — chunked upload endpoint paired with the MCP tool
+# request_upload_url. Auth is bearer-vs-hash (ephemeral bearer issued
+# by the tool) — NOT the Capa 2 MCP bearer middleware, so this router
+# attaches at the FastAPI level and validates inline.
+app.include_router(upload_router)
 
 
 # Capa 4 — mount the MCP server as an ASGI sub-app at /mcp. The

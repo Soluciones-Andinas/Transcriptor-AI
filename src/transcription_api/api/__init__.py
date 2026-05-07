@@ -10,5 +10,6 @@ the FastAPI app in ``main.py``. The auth dependencies live in
 re-implemented here (spec §7 contract).
 """
 from .transcriptions import router as transcriptions_router
+from .upload import router as upload_router
 
-__all__ = ["transcriptions_router"]
+__all__ = ["transcriptions_router", "upload_router"]
