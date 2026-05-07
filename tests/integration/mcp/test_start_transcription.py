@@ -589,3 +589,51 @@ async def test_start_transcription_unknown_upload_id_returns_not_found(
     finally:
         reset_ctx()
         reset_models()
+
+
+# ---------------------------------------------------------------------------
+# G2 — orphan upload_dir on orchestrate failure
+# ---------------------------------------------------------------------------
+async def test_start_transcription_cleans_upload_dir_on_orchestrate_failure(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: cleanup invariant (G2 review-fix) — When ``orchestrate``
+    raises a generic exception (simulating a GPU panic, a normalize-step
+    crash, or any non-typed failure), the per-upload directory must NOT
+    linger on disk. Prior implementation cleaned the dir AFTER the
+    ``mcp_request_session`` ctx mgr exited, which a propagated exception
+    skipped — leaving ``DATA_DIR/uploads/<id>/`` to grow on every error.
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="orphan"
+    )
+    _stage_upload_file(tmp_path, upload.id)
+    upload_dir = tmp_path / "uploads" / str(upload.id)
+    assert upload_dir.exists()  # sanity — fixture staged the bytes
+
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(side_effect=RuntimeError("simulated GPU crash")),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        with pytest.raises((McpError, RuntimeError)):
+            await start_transcription(upload_id=str(upload.id))
+    finally:
+        reset_ctx()
+        reset_models()
+
+    assert not upload_dir.exists(), (
+        f"upload dir leaked after orchestrate failure: {upload_dir}"
+    )
