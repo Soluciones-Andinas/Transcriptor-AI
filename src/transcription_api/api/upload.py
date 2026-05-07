@@ -34,7 +34,6 @@ import hmac
 import imghdr
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
 from uuid import uuid4
 
 from fastapi import (
@@ -55,17 +54,11 @@ from ..config import settings
 from ..db import get_session
 from ..db.models import Image, UploadSession
 from ..db.scoping import bypass_scoping
+from .errors import error_response as _error_resp
 
 logger = logging.getLogger("transcription_api.api.upload")
 
 router = APIRouter(prefix="/api", tags=["uploads"])
-
-
-def _error_resp(status: int, code: str, reason: str, **extra: Any) -> JSONResponse:
-    """Canonical error body shape for the upload endpoints."""
-    detail: dict[str, Any] = {"error_code": code, "reason": reason}
-    detail.update(extra)
-    return JSONResponse(status_code=status, content={"detail": detail})
 
 
 @router.post("/upload")
