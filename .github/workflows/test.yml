@@ -35,7 +35,7 @@ jobs:
     env:
       JWT_SECRET: ci-test-jwt-secret-do-not-use-in-prod-padding-padding
       OAUTH_TOKEN_ENC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-      DATA_DIR: ${{ runner.temp }}/transcription-data
+      DATA_DIR: /tmp/transcription-data
 
     steps:
       - uses: actions/checkout@v4
