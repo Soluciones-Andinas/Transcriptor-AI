@@ -1144,6 +1144,45 @@ que el operador tendría Docker.
 
 ---
 
+### D-049 🟢 Capa 4 review-fixes G13: ADR-016 documenta defensa en capas para scoping
+
+**Asumido ([ADR-015](../../wiki/ADR/ADR-015.md) + RF-MCP-00 §Per-user scoping)**:
+el listener `do_orm_execute` fail-closed era suficiente para garantizar
+el invariante de privacidad. Cualquier query naive sobre un per-user
+model con `session.info["user_id"]` no armado raisea
+`ScopingNotArmedError`, así que un call-site que olvida la dependency
+de auth queda detectado al primer hit a DB.
+
+**Reality (review multi-agente Capa 4, 2026-05-06)**: el listener
+clasifica como per-user model SOLO a aquel mapper cuya tabla declara
+columna `user_id`. Un modelo nuevo introducido en Capa 5+ que olvide
+la columna (tabla pensada como "ya scopeada por su FK") queda fuera
+de `_scoped_models()`, fuera del enforcement, y devuelve filas
+cross-user silenciosamente. El listener no actúa como guard, actúa
+como filtro condicional sobre una población mal clasificada.
+
+**Resolución**: nuevo
+[ADR-016](../../wiki/ADR/ADR-016.md) — defensa en dos capas. Capa 1
+(runtime listener, ADR-015 vigente) sin cambios. Capa 2 (startup
+classification guard) — `db/scoping.py::_validate_model_classification`
+itera `Base.registry.mappers` y rehúsa arrancar si un mapper carece
+de `user_id` y no está en `_NON_SCOPED_MODELS = frozenset({"User"})`.
+ADR-016 NO reemplaza ADR-015, complementa. Implementación + test ya
+existen en código (`tests/unit/db/test_scoping_classification.py`);
+G13 sólo agrega la documentación que faltaba.
+
+**Acción pendiente**: ninguna en código. Operadores que agreguen un
+modelo legítimamente global (Config, AuditLog) deben actualizar
+`_NON_SCOPED_MODELS` con review explícito sobre Privacy implications
+(la fricción es deliberada).
+
+**Lección**: defensa en capas — runtime + boot — para invariants
+estructurales de Privacy. Un solo checkpoint puede tener gaps de
+clasificación; dos checkpoints en momentos distintos del lifecycle
+los cubren. Same Privacy invariant, dos compuertas.
+
+---
+
 ## Resumen ejecutivo
 
 **Total drifts identificados**: 40 (10 Capa 2 review + 2 Capa 3 Batch 1 + 3 operacionales rig + 1 Batch 3 + 1 Batch 4 + 2 Batch 5 + 4 Capa 3 review post-fix SD-3..6 + 2 Capa 4 spec audit + 1 Capa 4 Batch 0 + 2 Capa 4 Batch 1).
