@@ -203,8 +203,10 @@ async def test_search_rejects_oversized_query(session):
 async def test_search_clamps_oversized_limit_to_50(session):
     """
     Spec: SPEC-capa4-mcp-v1
-    Criterion: pagination — limit > 50 silently clamps to 50 (FTS
-    is more expensive than list, hence stricter cap).
+    Criterion: pagination grace window (G5 review-fix) — values in
+    ``(MAX, MAX*2]`` silently clamp to ``MAX``; absurd values above
+    ``MAX*2`` raise (covered by ``test_search_invalid_limit_raises``).
+    FTS uses ``MAX=50`` so the grace window is ``(50, 100]``.
     """
     from transcription_api.mcp.tools.transcription import search_my_transcriptions
 
@@ -221,9 +223,8 @@ async def test_search_clamps_oversized_limit_to_50(session):
 
     reset = _arm_context(user.id, bearer.id)
     try:
-        # Should not raise; the clamp happens silently and the result
-        # returns whatever rows match (1 here).
-        results = await search_my_transcriptions(query="arquitectura", limit=999)
+        # 80 lies in (50, 100] grace window -> silently clamped to 50.
+        results = await search_my_transcriptions(query="arquitectura", limit=80)
     finally:
         reset()
 

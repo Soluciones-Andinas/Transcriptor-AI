@@ -145,9 +145,10 @@ async def test_list_respects_limit_and_offset(session):
 async def test_list_clamps_oversized_limit_to_100(session):
     """
     Spec: SPEC-capa4-mcp-v1
-    Criterion: pagination — limit > 100 silently clamps to 100. The
-    response's ``limit`` field reflects the clamped value so the
-    client knows what was actually applied.
+    Criterion: pagination grace window (G5 review-fix) — values within
+    ``(MAX, MAX*2]`` silently clamp to ``MAX`` so cooperative-but-loose
+    clients don't get an error for a tiny over-cap. Values above ``MAX*2``
+    raise INVALID_PARAMETER (covered by ``test_list_invalid_params_raise``).
     """
     from transcription_api.mcp.tools.transcription import list_my_transcriptions
 
@@ -159,7 +160,8 @@ async def test_list_clamps_oversized_limit_to_100(session):
 
     reset = _arm_context(user.id, bearer.id)
     try:
-        result = await list_my_transcriptions(limit=999)
+        # 150 lies in (100, 200] grace window -> silently clamped to 100.
+        result = await list_my_transcriptions(limit=150)
     finally:
         reset()
 

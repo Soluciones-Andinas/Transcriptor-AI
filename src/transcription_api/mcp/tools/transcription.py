@@ -42,6 +42,7 @@ from ...config import settings
 from ...db.models import Image, Transcription, UploadSession, User
 from ...pipeline.cache import CacheStore
 from ...pipeline.orchestrator import GPUBusy, PipelineTimeout, orchestrate
+from .._clamp import clamp_or_raise
 from ..errors import raise_tool_error
 from ..middleware import get_current_bearer_id, get_current_user_id
 from ..server import mcp_server
@@ -313,12 +314,11 @@ async def list_my_transcriptions(
             400,
         )
 
-    if limit > _LIST_LIMIT_MAX:
-        limit = _LIST_LIMIT_MAX
-    if limit < 1:
-        limit = 1
+    limit = clamp_or_raise(limit, lo=1, hi=_LIST_LIMIT_MAX, name="limit")
     if offset < 0:
-        offset = 0
+        raise_tool_error(
+            "INVALID_PARAMETER", "offset must be >= 0", 400, min=0
+        )
 
     user_id = get_current_user_id()
     async with mcp_request_session(user_id) as db:
@@ -416,10 +416,7 @@ async def search_my_transcriptions(
             max_chars=_SEARCH_QUERY_MAX,
         )
 
-    if limit > _SEARCH_LIMIT_MAX:
-        limit = _SEARCH_LIMIT_MAX
-    if limit < 1:
-        limit = 1
+    limit = clamp_or_raise(limit, lo=1, hi=_SEARCH_LIMIT_MAX, name="limit")
 
     user_id = get_current_user_id()
 
