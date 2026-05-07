@@ -39,7 +39,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 
 from ...config import settings
-from ...db.models import Transcription, UploadSession
+from ...db.models import Image, Transcription, UploadSession
 from ...pipeline.cache import CacheStore
 from ...pipeline.orchestrator import GPUBusy, PipelineTimeout, orchestrate
 from ..errors import raise_tool_error
@@ -78,6 +78,47 @@ def _serialize_summary(row: Transcription) -> dict[str, Any]:
         "language": row.language,
         "num_speakers": row.num_speakers,
         "created_at": row.created_at.isoformat(),
+    }
+
+
+def _serialize_image(row: Image) -> dict[str, Any]:
+    """Image attachment summary (used inside _serialize_full).
+
+    Excludes ``file_path`` from the public payload (it's an
+    implementation-specific blob path on disk, not a download URL —
+    clients use the ``transcription://<tid>/images/<iid>`` MCP
+    resource for byte access in Batch 5).
+    """
+    return {
+        "id": str(row.id),
+        "filename": row.filename,
+        "caption": row.caption,
+        "mime_type": row.mime_type,
+        "size_bytes": row.size_bytes,
+    }
+
+
+def _serialize_full(
+    row: Transcription, images: list[Image]
+) -> dict[str, Any]:
+    """Full transcription payload returned by get_transcription.
+
+    Mirrors the ``TranscriptionResult`` shape from ``05_modelo_datos.md``:
+    everything from ``_serialize_summary`` plus ``text_content``,
+    ``segments``, ``metadata``, and the ``images`` array.
+    """
+    segments_blob = row.segments or {}
+    segments = (
+        segments_blob.get("segments", [])
+        if isinstance(segments_blob, dict)
+        else []
+    )
+    return {
+        **_serialize_summary(row),
+        "text_content": row.text_content,
+        "segments": segments,
+        "metadata": row.extra_metadata,
+        "images": [_serialize_image(img) for img in images],
     }
 
 
@@ -394,3 +435,59 @@ async def search_my_transcriptions(
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# get_transcription — RF-MCP-06
+# ---------------------------------------------------------------------------
+@mcp_server.tool(name="get_transcription")
+async def get_transcription(transcription_id: str) -> dict[str, Any]:
+    """Full transcription dict for a single id (AC-5).
+
+    Cross-user / unknown / soft-deleted all collapse to
+    ``TRANSCRIPTION_NOT_FOUND`` (404) with identical body — no
+    existence leak across the three causes.
+    """
+    user_id = get_current_user_id()
+
+    try:
+        tid = UUID(transcription_id)
+    except (TypeError, ValueError):
+        raise_tool_error(
+            "INVALID_PARAMETER",
+            f"transcription_id is not a valid UUID: {transcription_id!r}",
+            400,
+        )
+
+    async with mcp_request_session(user_id) as db:
+        # Listener AND-injects user_id; cross-user lookups yield None
+        # which we collapse to NOT_FOUND. The deleted_at filter does
+        # the same for soft-deleted rows of the OWNER (no leak about
+        # the row's history).
+        row = (
+            await db.execute(
+                select(Transcription).where(
+                    Transcription.id == tid,
+                    Transcription.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise_tool_error(
+                "TRANSCRIPTION_NOT_FOUND",
+                "transcription not found",
+                404,
+            )
+
+        # Fetch attached images (also user-scoped + soft-delete-filtered).
+        # Image carries user_id denormalized so the listener applies.
+        images = (
+            await db.execute(
+                select(Image).where(
+                    Image.transcription_id == tid,
+                    Image.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+
+    return _serialize_full(row, list(images))
