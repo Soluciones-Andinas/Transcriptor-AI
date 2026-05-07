@@ -1135,9 +1135,9 @@ Contenido:
 |---|---|---|---|
 | AC-1 | B2.1, B2.4, B3.1 | tests/integration/mcp/test_request_upload_url.py (9 tests) + tests/integration/api/test_upload.py (7 tests) + tests/integration/mcp/test_start_transcription.py (10 tests: 5 happy/lock/timeout/models + 5 edge cases) | RED `b50f1ba`+`e5df696`+`b542db9`+`b1ed27d` / GREEN `75a3f66`+`63ded4f`+`1d1600b` (full chain B2+B3 closed) |
 | AC-2 | B3.3 | tests/integration/mcp/test_start_transcription.py::test_start_transcription_cross_user_returns_not_found (listener fail-closed AND-injects user_id; cross-user upload_id surfaces UPLOAD_SESSION_NOT_FOUND, no existence leak) | RED `b1ed27d` / GREEN `1d1600b` |
-| AC-3 | B4.1 | tests/integration/mcp/test_list.py | |
-| AC-4 | B4.2 | tests/integration/mcp/test_search.py | |
-| AC-5 | B4.3 | tests/integration/mcp/test_get_transcription.py | |
+| AC-3 | B4.1 | tests/integration/mcp/test_list_my_transcriptions.py (5 tests: cross-user isolation + pagination + limit clamp + soft-delete filter + sort whitelist) | RED `772799f` / GREEN `a4e92f8` |
+| AC-4 | B4.2 | tests/integration/mcp/test_search_my_transcriptions.py (5 tests: FTS rank+snippet + cross-user + empty/oversized query + limit clamp) | RED `1ea3ef0` / GREEN `3befcf2` |
+| AC-5 | B4.3 | tests/integration/mcp/test_get_transcription.py (5 tests: own full payload + cross-user 404 + unknown 404 + soft-deleted 404 + invalid uuid) | RED `677645d` / GREEN `0d58662` |
 | AC-6 | B5.1 | tests/integration/mcp/test_resources.py | |
 | AC-7 | B2.4 + B5.1 | tests/integration/mcp/test_resources.py::test_image_resource | |
 | AC-8 | B1.3 + B1.4 | tests/integration/mcp/test_mcp_middleware.py (4 tests cubren no-header / malformed / unknown / revoked) | RED `a7eeb01` / GREEN `78c25dd` |
