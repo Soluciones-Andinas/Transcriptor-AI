@@ -41,3 +41,51 @@ async def test_mcp_endpoint_does_not_404():
         f"MCP sub-app not mounted; got 404 from FastAPI. "
         f"body={resp.text!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# G11 — AC-12 canonical surface (tools + resource templates)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_list_tools_returns_seven_canonical_names():
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-12 (G11 review-fix) — the MCP server MUST register
+    the seven Capa 4 verbs and no others. A drift here means the
+    ``tools/__init__.py`` import chain (G6 split) is missing a module
+    or a stale tool registration is being shadowed.
+    """
+    # Trigger registration via the same import chain main.py uses.
+    import transcription_api.mcp  # noqa: F401
+    from transcription_api.mcp.server import mcp_server
+
+    tools = await mcp_server.list_tools()
+    names = sorted(t.name for t in tools)
+    assert names == sorted(
+        [
+            "request_upload_url",
+            "start_transcription",
+            "list_my_transcriptions",
+            "search_my_transcriptions",
+            "get_transcription",
+            "delete_transcription",
+            "get_user_info",
+        ]
+    ), names
+
+
+@pytest.mark.asyncio
+async def test_list_resources_returns_two_uri_templates():
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-12 (G11 review-fix) — MCP resources cover the
+    transcription dict and the per-image binary resource. A regression
+    that drops either template would break ``transcription://{id}``
+    or AC-7 image fetch.
+    """
+    import transcription_api.mcp  # noqa: F401
+    from transcription_api.mcp.server import mcp_server
+
+    templates = sorted(t.uriTemplate for t in await mcp_server.list_resource_templates())
+    assert "transcription://{transcription_id}" in templates
+    assert any("/images/{image_id}" in t for t in templates), templates
