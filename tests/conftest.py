@@ -153,7 +153,7 @@ async def engine(migrated_db_url: str):
 
 @pytest_asyncio.fixture
 async def session(engine) -> AsyncGenerator:
-    """Per-test AsyncSession with auto-rollback to keep tests isolated.
+    """Per-test AsyncSession with auto-rollback + post-test TRUNCATE.
 
     The fixture session is the test driver's lane (factories, verification
     queries) — NOT the lane the FastAPI request handlers use. We arm
@@ -162,11 +162,33 @@ async def session(engine) -> AsyncGenerator:
     behavior is exercised through the FastAPI client + `get_session()`
     dependency, which produces a separate session armed with `user_id`
     by the auth middleware.
+
+    **TRUNCATE on teardown** (Capa 4 CI G14 fix): rollback alone keeps
+    the test driver lane clean, but production code paths exercised by
+    integration tests (notably ``auth/routes.py::callback`` upsert under
+    ``bypass_scoping``) commit through the FastAPI dependency session.
+    Those commits survive the test-driver rollback. Without the
+    TRUNCATE, the next test (or the next parametrize value) hits
+    ``UniqueViolationError`` on hardcoded emails like
+    ``alice@sandinas.test``. TRUNCATE CASCADE wipes every per-user
+    table after each test, restoring isolation. Cost: ~5ms per test
+    against an empty schema.
     """
+    from sqlalchemy import text
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
     async with factory() as s:
         s.info["scoping_bypass"] = True
-        yield s
-        await s.rollback()
+        try:
+            yield s
+        finally:
+            await s.rollback()
+
+    # Wipe any rows committed via production code paths during the test.
+    # CASCADE handles dependent tables; explicit list keeps intent clear.
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "TRUNCATE users, oauth_tokens, mcp_bearers, transcriptions, "
+            "images, upload_sessions RESTART IDENTITY CASCADE"
+        ))
