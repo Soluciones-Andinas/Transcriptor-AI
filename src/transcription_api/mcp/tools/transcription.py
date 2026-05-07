@@ -304,3 +304,93 @@ async def list_my_transcriptions(
         "limit": limit,
         "offset": offset,
     }
+
+
+# ---------------------------------------------------------------------------
+# search_my_transcriptions — RF-MCP-05
+# ---------------------------------------------------------------------------
+_SEARCH_LIMIT_MAX = 50
+_SEARCH_QUERY_MAX = 200
+# Spanish text-search config (PG core; no extension needed).
+_FTS_CONFIG = "spanish"
+# ts_headline options: bold the matched terms, 5-20 words around match.
+_TS_HEADLINE_OPTS = (
+    "MaxWords=20, MinWords=5, ShortWord=3, HighlightAll=false"
+)
+
+
+@mcp_server.tool(name="search_my_transcriptions")
+async def search_my_transcriptions(
+    query: str,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Spanish full-text search across the caller's transcriptions (AC-4).
+
+    Uses Postgres' built-in ``to_tsvector('spanish', ...) @@
+    plainto_tsquery('spanish', ...)`` against the
+    ``idx_transcriptions_text_fts`` GIN index (Capa 1 migration).
+    Results are ranked by ``ts_rank``; ``ts_headline`` produces a
+    snippet showing the matched terms.
+
+    Cross-user isolation: the SELECT body is built via the ORM
+    ``select(Transcription.id, ...)`` so the ADR-014/015 listener
+    AND-injects ``WHERE user_id = current_user.id``. Raw ``text()``
+    SQL would bypass the listener — D-049-style risk avoided.
+    """
+    cleaned = query.strip()
+    if not cleaned:
+        raise_tool_error(
+            "INVALID_PARAMETER", "query must not be empty", 400
+        )
+    if len(cleaned) > _SEARCH_QUERY_MAX:
+        raise_tool_error(
+            "INVALID_PARAMETER",
+            f"query exceeds {_SEARCH_QUERY_MAX} chars",
+            400,
+            max_chars=_SEARCH_QUERY_MAX,
+        )
+
+    if limit > _SEARCH_LIMIT_MAX:
+        limit = _SEARCH_LIMIT_MAX
+    if limit < 1:
+        limit = 1
+
+    user_id = get_current_user_id()
+
+    ts_query = func.plainto_tsquery(_FTS_CONFIG, cleaned)
+    ts_vector = func.to_tsvector(_FTS_CONFIG, Transcription.text_content)
+    rank_expr = func.ts_rank(ts_vector, ts_query).label("rank")
+    snippet_expr = func.ts_headline(
+        _FTS_CONFIG,
+        Transcription.text_content,
+        ts_query,
+        _TS_HEADLINE_OPTS,
+    ).label("snippet")
+
+    stmt = (
+        select(
+            Transcription.id,
+            Transcription.original_filename,
+            Transcription.duration_seconds,
+            rank_expr,
+            snippet_expr,
+        )
+        .where(Transcription.deleted_at.is_(None))
+        .where(ts_vector.op("@@")(ts_query))
+        .order_by(rank_expr.desc())
+        .limit(limit)
+    )
+
+    async with mcp_request_session(user_id) as db:
+        rows = (await db.execute(stmt)).all()
+
+    return [
+        {
+            "id": str(r.id),
+            "original_filename": r.original_filename,
+            "duration_seconds": float(r.duration_seconds),
+            "rank": float(r.rank),
+            "snippet": r.snippet,
+        }
+        for r in rows
+    ]
