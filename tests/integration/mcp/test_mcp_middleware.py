@@ -195,3 +195,37 @@ async def test_mcp_valid_bearer_passes_middleware_and_bumps_last_used_at(session
     assert refreshed.last_used_at is not None, (
         "AC-14: successful auth must bump last_used_at"
     )
+
+
+# ---------------------------------------------------------------------------
+# G11.4 — AC-14 best-effort bump failure tolerated
+# ---------------------------------------------------------------------------
+async def test_mcp_valid_bearer_passes_when_last_used_at_bump_fails(
+    session, monkeypatch
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-14 + H-6 (G11 review-fix) — Given a valid bearer, When
+    the best-effort ``last_used_at`` UPDATE fails (simulating a DB
+    hiccup), Then the request still authenticates successfully — the
+    middleware must NOT 401 just because the bump failed. Guards the
+    tolerance contract: a flaky bump path cannot lock users out.
+    """
+    from unittest.mock import AsyncMock
+
+    user = await make_user(session, email="bump-fail@x")
+    plaintext, token_hash = generate_bearer()
+    await make_bearer(session, user_id=user.id, token_hash=token_hash)
+    await session.commit()
+
+    monkeypatch.setattr(
+        "transcription_api.mcp.middleware._bump_last_used_at",
+        AsyncMock(side_effect=RuntimeError("simulated DB hiccup")),
+    )
+
+    resp = await _post_mcp(headers={"authorization": f"Bearer {plaintext}"})
+
+    assert resp.status_code != 401, (
+        "AC-14 H-6: a bump failure must not reject the request; "
+        f"body={resp.text!r}"
+    )

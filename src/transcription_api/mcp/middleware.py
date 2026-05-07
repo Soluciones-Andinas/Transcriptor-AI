@@ -128,22 +128,37 @@ async def _authenticate(plaintext: str) -> tuple[UUID, UUID]:
                     "MCP_BEARER_REVOKED", "bearer was revoked"
                 )
 
-            # AC-14 best-effort last_used_at bump.
-            try:
-                await session.execute(
-                    update(McpBearer)
-                    .where(McpBearer.id == row.id)
-                    .values(last_used_at=func.clock_timestamp())
-                )
-                await session.commit()
-            except Exception:  # noqa: BLE001 — best-effort H-6
-                logger.warning(
-                    "mcp_last_used_at_bump_failed bearer_id=%s", row.id,
-                    exc_info=True,
-                )
-                await session.rollback()
+            # AC-14 best-effort last_used_at bump (G11.4 — extracted so
+            # tests can monkeypatch the failure path independently of
+            # the lookup).
+            await _bump_last_used_at(session, row.id)
 
             return row.user_id, row.id
+
+
+async def _bump_last_used_at(session, bearer_id: UUID) -> None:
+    """Best-effort UPDATE of ``mcp_bearers.last_used_at = now()``.
+
+    AC-14 + H-6 — a transient DB hiccup on the bump (a deadlock with a
+    concurrent bearer regen, a connection drop, etc.) MUST NOT 401 the
+    request that just authenticated successfully. Failures are logged
+    at WARNING and swallowed; the caller retains the user_id / bearer_id
+    pair that the lookup already validated.
+    """
+    try:
+        await session.execute(
+            update(McpBearer)
+            .where(McpBearer.id == bearer_id)
+            .values(last_used_at=func.clock_timestamp())
+        )
+        await session.commit()
+    except Exception:  # noqa: BLE001 — best-effort H-6
+        logger.warning(
+            "mcp_last_used_at_bump_failed bearer_id=%s",
+            bearer_id,
+            exc_info=True,
+        )
+        await session.rollback()
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
