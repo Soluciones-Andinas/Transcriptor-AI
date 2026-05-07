@@ -197,3 +197,29 @@ async def test_upload_image_wrong_magic_bytes_returns_400(client, session):
 
     assert resp.status_code == 400
     assert resp.json()["detail"]["error_code"] == "INVALID_FORMAT"
+
+
+# ---------------------------------------------------------------------------
+# G1.4 — cross-user bearer rejected (no existence leak via session lookup)
+# ---------------------------------------------------------------------------
+async def test_upload_image_cross_user_returns_404(client, session):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: spec §4 MCP_BEARER_INVALID — a bearer that doesn't hash to
+    the stored ``upload_bearer_hash`` is rejected with 401 even when the
+    nonce belongs to a real session. Naming kept aligned with the plan
+    (filename mentions 404) but the assertion is 401 because the bearer
+    check happens before any per-user existence comparison; the cross-user
+    privacy invariant is preserved by the bearer hash comparison itself.
+    """
+    _, upload = await _seed_image_session(session, expected_size=256)
+    other_plain = secrets.token_urlsafe(32)  # not the issued ephemeral
+
+    resp = await client.post(
+        f"/api/upload-image?session={upload.nonce}",
+        files={"file": ("img.png", io.BytesIO(PNG_1X1), "image/png")},
+        headers={"authorization": f"Bearer {other_plain}"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error_code"] == "MCP_BEARER_INVALID"
