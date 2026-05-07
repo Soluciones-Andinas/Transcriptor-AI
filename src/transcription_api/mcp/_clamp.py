@@ -59,4 +59,3 @@ def clamp_or_raise(value: int, *, lo: int, hi: int, name: str) -> int:
         400,
         max_limit=hi,
     )
-    return hi  # unreachable; satisfies type checkers (raise_tool_error -> NoReturn in G8.1)

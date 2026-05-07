@@ -18,7 +18,7 @@ control-flow is obvious.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
@@ -29,7 +29,7 @@ def raise_tool_error(
     reason: str,
     http_status: int,
     **extra: Any,
-) -> None:
+) -> NoReturn:
     """Raise ``McpError`` carrying the spec discriminator in ``data``.
 
     Args:
