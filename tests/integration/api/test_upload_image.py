@@ -170,3 +170,30 @@ async def test_upload_image_happy(client, session, tmp_path):
         )
     ).scalar_one()
     assert status == "uploaded"
+
+
+# ---------------------------------------------------------------------------
+# G1.3 — magic-byte mismatch (INVALID_FORMAT)
+# ---------------------------------------------------------------------------
+async def test_upload_image_wrong_magic_bytes_returns_400(client, session):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: spec §4 INVALID_FORMAT — body declares ``image/png`` but
+    the bytes start with the JPEG SOI marker (``FF D8``). The endpoint
+    sniffs magic bytes via stdlib ``imghdr`` and rejects the mismatch,
+    preventing a malicious caller from smuggling a non-PNG payload past
+    the kind/MIME check.
+    """
+    plaintext, upload = await _seed_image_session(
+        session, expected_size=256, expected_mime="image/png"
+    )
+    fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 60  # JPEG SOI + filler
+
+    resp = await client.post(
+        f"/api/upload-image?session={upload.nonce}",
+        files={"file": ("fake.png", io.BytesIO(fake_jpeg), "image/png")},
+        headers={"authorization": f"Bearer {plaintext}"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error_code"] == "INVALID_FORMAT"
