@@ -180,6 +180,69 @@ async def test_delete_idempotent_second_call_returns_not_found(session):
 
 
 # ---------------------------------------------------------------------------
+# G11.6 — idempotent delete preserves first deleted_at
+# ---------------------------------------------------------------------------
+async def test_delete_idempotent_preserves_first_deleted_at(session):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-11 idempotency strengthened (G11 review-fix) — Given a
+    transcription deleted at ``T0``, When a second delete on the same id
+    runs (returning NOT_FOUND), Then ``transcriptions.deleted_at`` MUST
+    still equal ``T0``. Strengthens the prior NOT_FOUND check by pinning
+    the row contract: the second UPDATE filters by ``deleted_at IS NULL``,
+    matches zero rows, and does not overwrite the original timestamp.
+    Without this guarantee, a malicious caller could rotate the
+    ``deleted_at`` value on a tombstoned row.
+    """
+    from mcp.shared.exceptions import McpError
+    from sqlalchemy import text
+
+    from transcription_api.mcp.tools.transcription import delete_transcription
+
+    user, bearer = await _seed_user_with_bearer(
+        session, email_suffix=f"idem-preserve-{secrets.token_hex(2)}"
+    )
+    row = await make_transcription(
+        session,
+        user_id=user.id,
+        audio_hash="idemp-" + "0" * 58,
+    )
+    await session.commit()
+
+    reset = _arm_context(user.id, bearer.id)
+    try:
+        await delete_transcription(transcription_id=str(row.id))
+    finally:
+        reset()
+
+    first_deleted_at = (
+        await session.execute(
+            text("SELECT deleted_at FROM transcriptions WHERE id = :tid"),
+            {"tid": row.id},
+        )
+    ).scalar_one()
+    assert first_deleted_at is not None
+
+    reset = _arm_context(user.id, bearer.id)
+    try:
+        with pytest.raises(McpError) as exc:
+            await delete_transcription(transcription_id=str(row.id))
+        assert _is_tool_error(exc.value, "TRANSCRIPTION_NOT_FOUND")
+    finally:
+        reset()
+
+    second_deleted_at = (
+        await session.execute(
+            text("SELECT deleted_at FROM transcriptions WHERE id = :tid"),
+            {"tid": row.id},
+        )
+    ).scalar_one()
+    assert second_deleted_at == first_deleted_at, (
+        "deleted_at must NOT change on a second (rejected) delete"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cross-user
 # ---------------------------------------------------------------------------
 async def test_delete_other_user_returns_not_found(session):
