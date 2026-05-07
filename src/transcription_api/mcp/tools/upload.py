@@ -27,6 +27,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlencode, urljoin
 from uuid import UUID, uuid4
 
 from ...auth.mcp_bearer import hash_bearer
@@ -174,8 +175,19 @@ async def request_upload_url(
         db.add(row)
         await db.flush()
 
+    # G10.2 — urljoin + urlencode keep the URL safe under odd
+    # public_base_url shapes (trailing slash or none) and any future
+    # nonce that contained reserved chars. Today nonces are token_urlsafe
+    # so the encoding is a no-op, but the helper makes the build robust
+    # to a future change in the nonce alphabet.
     path = "/api/upload" if kind == "audio" else "/api/upload-image"
-    upload_url = f"{settings.public_base_url}{path}?session={nonce}"
+    base = settings.public_base_url
+    if not base.endswith("/"):
+        base = base + "/"
+    # Strip leading slash so urljoin doesn't drop the base path.
+    upload_url = urljoin(base, path.lstrip("/")) + "?" + urlencode(
+        {"session": nonce}
+    )
 
     return {
         "upload_url": upload_url,
