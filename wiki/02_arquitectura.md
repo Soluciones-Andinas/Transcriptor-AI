@@ -177,6 +177,7 @@ sequenceDiagram
 | [ADR-013](ADR/ADR-013.md) | Upload de blobs vía endpoints HTTP autenticados | Aceptada | 2026-04-30 | §3, §4 — define `/api/upload`, `/api/upload-image` |
 | [ADR-014](ADR/ADR-014.md) | Per-user scoping enforcement vía SQLAlchemy event listener | Reemplazada por ADR-015 | 2026-05-04 | §3 — versión fail-open original |
 | [ADR-015](ADR/ADR-015.md) | Listener de scoping fail-closed + `bypass_scoping` context manager | Aceptada | 2026-05-05 | §3, §8 — query sin `user_id` armado raise `ScopingNotArmedError`; bypass explícito vía context manager |
+| [ADR-016](ADR/ADR-016.md) | Defensa en capas para per-user scoping (startup classification + listener) | Aceptada | 2026-05-07 | §8 — startup guard complementa listener fail-closed; modelo nuevo sin `user_id` rompe boot en lugar de leak silencioso |
 
 ## 8. Seguridad, Observabilidad y Resiliencia
 
