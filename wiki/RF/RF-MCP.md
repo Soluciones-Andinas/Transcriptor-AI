@@ -50,6 +50,8 @@ Este RF NO describe un endpoint o tool concreto: define los invariantes que TODO
 - **Garantía**: una tool / resource handler NO puede leakear datos de otros users aunque omita el `WHERE user_id = X` explícito en la query. Si la dependency de auth se omite por error, la query raise `ScopingNotArmedError` (no leak silencioso).
 - **Bypass intencional**: solo para auth lookups y mantenimiento administrativo, vía `with bypass_scoping(session): ...`. Nunca dentro de un tool/resource handler de Capa 6.
 
+> **Implementation note (Capa 4 G13)**: tool/resource handlers que operan sobre per-user models emiten queries ORM **sin** predicate `user_id` explícito. El listener ([ADR-015](../ADR/ADR-015.md)) AND-injecta `WHERE user_id = X` desde `db.info["user_id"]` armado por el bearer middleware en `scoped_session(user_id)` (`db/session.py`). [ADR-016](../ADR/ADR-016.md) agrega un startup classification guard que rehúsa arrancar el servicio si un modelo nuevo carece de `user_id` y no está allowlisted en `_NON_SCOPED_MODELS` — defensa en capas runtime + boot.
+
 ### Naming convention
 
 | Elemento | Convención | Ejemplos |
@@ -242,7 +244,7 @@ Scenario: Archivo demasiado grande
 | 3 | Si no encontrada: `UPLOAD_SESSION_NOT_FOUND` (404) |
 | 4 | Si `status='consumed'`: `UPLOAD_SESSION_ALREADY_CONSUMED` (409) |
 | 5 | Si `status='requested'` (no se hizo upload): `UPLOAD_SESSION_NOT_FOUND` (404) |
-| 6 | Si `status='expired'` o `now > expires_at + grace`: `UPLOAD_SESSION_NOT_FOUND` |
+| 6 | Si `status='expired'` o `now > expires_at + UPLOAD_SESSION_GRACE_SECONDS`: `UPLOAD_SESSION_NOT_FOUND`. Default grace = 30s para tolerar clock skew cliente/servidor (G8.4 — configurable vía `settings.upload_session_grace_seconds`). |
 | 7 | Adquirir lock global (RF-TRX-04) con timeout 5 s; si falla: `LOCK_BUSY` (503) |
 | 8 | Ejecutar pipeline (RF-TRX-01 si miss, RF-TRX-02 si hit) sobre `<DATA_DIR>/uploads/<upload_id>/original.bin` |
 | 9 | Persistir TranscriptionResult: INSERT transcriptions con `user_id, audio_hash, original_filename, original_size_bytes, duration_seconds, language, num_speakers, text, segments JSONB, metadata JSONB` |
