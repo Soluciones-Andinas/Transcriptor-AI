@@ -158,7 +158,7 @@ def _models_loaded_or_503(request: Request) -> JSONResponse | None:
     )
 
 
-@router.post("/transcriptions")
+@router.post("/transcriptions", deprecated=True)
 async def post_transcription(
     request: Request,
     file: UploadFile = File(...),
@@ -169,7 +169,22 @@ async def post_transcription(
     user: User = Depends(get_current_user_mcp),
     db: AsyncSession = Depends(get_session),
 ) -> JSONResponse:
-    """POST /api/transcriptions — multipart upload + bearer + orchestrate."""
+    """POST /api/transcriptions — multipart upload + bearer + orchestrate.
+
+    Capa 4 AC-16 / D-026: this endpoint is marked ``deprecated=True`` in
+    OpenAPI and emits a WARN ``legacy_endpoint_invoked`` on every
+    invocation. It still works (rig smoke-test depends on it); removal
+    is scheduled for Capa 5. The MCP flow ``request_upload_url`` ->
+    ``POST /api/upload`` -> ``start_transcription`` is the replacement.
+    """
+
+    # AC-16 — emit one WARN per invocation BEFORE any other branch so
+    # 503 / 401 / 413 paths still increment the legacy-usage counter.
+    logger.warning(
+        "legacy_endpoint_invoked "
+        "deprecated_endpoint=POST_/api/transcriptions "
+        "removal_target=Capa5"
+    )
 
     # AC-15 — short-circuit BEFORE accepting the upload if either model
     # failed to load. Saves the network round-trip on a degraded service.
