@@ -1,7 +1,7 @@
-"""``POST /api/upload`` — RF-MCP-03 chunked-audio upload endpoint.
+"""``POST /api/upload`` + ``POST /api/upload-image`` — RF-MCP-03 / RF-IMG-02.
 
 Spec: SPEC-capa4-mcp-v1
-Covers (Batch 2 task 2.4):
+Covers (Batch 2 task 2.4 + G1 + G9 review-fixes):
 - AC-1 — Receives the binary requested via the MCP tool
   ``request_upload_url``. Auth uses the ephemeral bearer (validated
   against ``upload_sessions.upload_bearer_hash`` with
@@ -13,13 +13,20 @@ Covers (Batch 2 task 2.4):
   ``expected_size_bytes * 1.05``; partial file unlinked.
 - AC-10 ``UPLOAD_SESSION_NOT_FOUND`` — unknown nonce OR expired
   session. Same error_code regardless of cause (no existence leak).
-- spec §4 ``INVALID_PARAMETER`` — session.kind != 'audio'. Image
-  upload uses a separate endpoint (RF-IMG; deferred).
+- spec §4 ``INVALID_PARAMETER`` — session.kind mismatch.
+- AC-7 image branch — magic-byte sniff via stdlib ``imghdr``,
+  bytes land at ``<DATA_DIR>/blobs/<user>/<tx>/<id>.<ext>``.
 
-Note: the image endpoint (``POST /api/upload-image``) is RF-IMG scope
-and lands in a later batch. The audio endpoint here is the minimum
-needed for the ``request_upload_url(audio) -> POST -> start_transcription``
-chain to close end-to-end at Batch 3.
+Auth model (G9 review-fix — operator-facing invariant):
+This endpoint authenticates via the EPHEMERAL upload bearer in
+``Authorization: Bearer <plaintext>``. The user identity is derived
+from ``upload_sessions.user_id`` (a per-row column), NOT from the
+ADR-014/015 scoping listener — ``db.info["user_id"]`` is intentionally
+NEVER armed in this handler. Any new ORM query in this file MUST
+verify ownership manually (via the ``upload_sessions`` row) and run
+inside ``bypass_scoping(db)``. The bypass blocks are kept narrow on
+purpose: each one wraps exactly the cross-user statement, never the
+whole handler body.
 """
 from __future__ import annotations
 
