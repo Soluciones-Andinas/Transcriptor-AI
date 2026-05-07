@@ -637,3 +637,61 @@ async def test_start_transcription_cleans_upload_dir_on_orchestrate_failure(
     assert not upload_dir.exists(), (
         f"upload dir leaked after orchestrate failure: {upload_dir}"
     )
+
+
+# ---------------------------------------------------------------------------
+# G2.4 — orchestrate kwargs explicit assertion
+# ---------------------------------------------------------------------------
+async def test_start_transcription_passes_correct_kwargs_to_orchestrate(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: kwargs traceability (G2 review-fix) — When the tool runs
+    with explicit ``language`` / ``min_speakers`` / ``max_speakers`` /
+    ``num_speakers``, Then ``orchestrate`` receives those exact kwargs
+    plus the lifespan-armed ``whisper_model`` / ``pyannote_pipeline`` /
+    ``cache_store`` / ``user_id``. Guards against silent kwargs drift
+    if the orchestrator signature evolves and the tool's call site is
+    not updated in lock step.
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="kwargs"
+    )
+    _stage_upload_file(tmp_path, upload.id)
+    mock_orch = AsyncMock(return_value=_orchestrator_result())
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate", mock_orch
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        await start_transcription(
+            upload_id=str(upload.id),
+            language="en",
+            min_speakers=2,
+            max_speakers=4,
+            num_speakers=3,
+        )
+    finally:
+        reset_ctx()
+        reset_models()
+
+    mock_orch.assert_awaited_once()
+    kwargs = mock_orch.await_args.kwargs
+    assert kwargs["user_id"] == user.id
+    assert kwargs["language"] == "en"
+    assert kwargs["min_speakers"] == 2
+    assert kwargs["max_speakers"] == 4
+    assert kwargs["num_speakers"] == 3
+    assert kwargs["original_size_bytes"] == upload.expected_size_bytes
+    # Lifespan-armed handles must propagate (not None / not new).
+    assert kwargs["whisper_model"] is not None
+    assert kwargs["pyannote_pipeline"] is not None
+    assert kwargs["cache_store"] is not None
