@@ -820,6 +820,56 @@ async def test_post_503_pyannote_detail_propagates_specific_string(
     app_with_models_ready.state.pyannote_detail = None
 
 
+# ---------------------------------------------------------------------------
+# AC-16 (Capa 4) — Legacy endpoint WARN log on invocation
+# (OpenAPI deprecation flag is asserted in test_legacy_deprecation.py — that
+# assertion is decorator-time and does not need testcontainers / Docker.)
+# ---------------------------------------------------------------------------
+async def test_post_transcriptions_emits_legacy_warn_on_invocation(
+    client, session, caplog
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-16 — When the legacy endpoint is invoked, the handler
+    emits a WARN log with the structured fields
+    ``legacy_endpoint_invoked deprecated_endpoint=POST_/api/transcriptions
+    removal_target=Capa5``. The endpoint still returns the orchestrator
+    result (deprecation is signal, not break) — Capa 5 will remove it.
+    """
+    import logging
+
+    user, plaintext = await _seed_user_with_bearer(session, email_suffix="legacy")
+    transcription_id = uuid.uuid4()
+    expected = _orchestrator_result(
+        transcription_id=transcription_id, audio_hash="c" * 64
+    )
+
+    with caplog.at_level(logging.WARNING, logger="transcription_api.api.transcriptions"):
+        with patch(
+            "transcription_api.api.transcriptions.orchestrate",
+            new=AsyncMock(return_value=expected),
+        ):
+            r = await client.post(
+                "/api/transcriptions",
+                files={"file": ("x.mp3", io.BytesIO(b"ID3" + b"\x00" * 32), "audio/mpeg")},
+                data={"language": "es"},
+                headers={"authorization": f"Bearer {plaintext}"},
+            )
+
+    assert r.status_code == 200, r.text
+    warns = [
+        rec for rec in caplog.records
+        if rec.levelno == logging.WARNING and "legacy_endpoint_invoked" in rec.getMessage()
+    ]
+    assert warns, (
+        "expected a WARN with 'legacy_endpoint_invoked' on legacy POST; got: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+    msg = warns[0].getMessage()
+    assert "deprecated_endpoint=POST_/api/transcriptions" in msg
+    assert "removal_target=Capa5" in msg
+
+
 # H-9 / AC-9 — /health "loading" default surfaces when state attrs missing.
 async def test_health_loading_default_when_state_attrs_unset(
     app_with_models_ready, client
