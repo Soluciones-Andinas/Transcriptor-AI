@@ -144,6 +144,7 @@ async def test_request_upload_url_rejects_unknown_kind(session):
     Criterion: spec §4 INVALID_PARAMETER — kind not in {'audio','image'}.
     """
     from mcp.shared.exceptions import McpError
+
     from transcription_api.mcp.tools.upload import request_upload_url
 
     user, bearer = await _seed_user_and_bearer(session, email_suffix="bad-kind")
@@ -162,6 +163,7 @@ async def test_request_upload_url_rejects_non_positive_size(session):
     Criterion: spec §4 INVALID_PARAMETER — file_size_bytes <= 0.
     """
     from mcp.shared.exceptions import McpError
+
     from transcription_api.mcp.tools.upload import request_upload_url
 
     user, bearer = await _seed_user_and_bearer(session, email_suffix="zero-size")
@@ -183,6 +185,7 @@ async def test_request_upload_url_rejects_audio_too_large(session):
     Criterion: spec §4 FILE_TOO_LARGE — kind=audio + size > MAX_UPLOAD_MB.
     """
     from mcp.shared.exceptions import McpError
+
     from transcription_api.config import settings
     from transcription_api.mcp.tools.upload import request_upload_url
 
@@ -248,6 +251,7 @@ async def test_request_upload_url_image_cross_user_returns_not_found(session):
     (no existence leak).
     """
     from mcp.shared.exceptions import McpError
+
     from transcription_api.mcp.tools.upload import request_upload_url
 
     alice = await make_user(session, email="alice-cross@x")
@@ -278,6 +282,7 @@ async def test_request_upload_url_image_rejects_missing_mime(session):
     images do (we whitelist known MIMEs upfront).
     """
     from mcp.shared.exceptions import McpError
+
     from transcription_api.mcp.tools.upload import request_upload_url
 
     user, bearer = await _seed_user_and_bearer(
@@ -304,6 +309,7 @@ async def test_request_upload_url_image_rejects_unsupported_mime(session):
     the supported set (png/jpeg/webp/gif).
     """
     from mcp.shared.exceptions import McpError
+
     from transcription_api.mcp.tools.upload import request_upload_url
 
     user, bearer = await _seed_user_and_bearer(
@@ -332,6 +338,7 @@ async def test_request_upload_url_image_rejects_missing_transcription_id(session
     transcription_id (an image is always linked to a parent transcript).
     """
     from mcp.shared.exceptions import McpError
+
     from transcription_api.mcp.tools.upload import request_upload_url
 
     user, bearer = await _seed_user_and_bearer(

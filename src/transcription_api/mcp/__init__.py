@@ -14,6 +14,12 @@ must run BEFORE ``streamable_http_app()`` is invoked, otherwise the
 ASGI app does not see the tool. We import submodules first, then build
 the app — keep new tool modules added to the imports below.
 """
+# Tool / resource registrations land here as Batches 2+ tasks ship.
+# Each submodule decorates against ``mcp_server`` at import time. The
+# imports MUST happen before ``streamable_http_app()`` is invoked
+# (see comment at the build line below) — late registration has no
+# effect on the ASGI app.
+from . import tools as _tools  # noqa: F401, E402 — registers tools at import
 from .middleware import (
     BearerAuthMiddleware,
     McpAuthError,
@@ -22,11 +28,6 @@ from .middleware import (
 )
 from .server import mcp_server
 from .session import mcp_request_session
-
-# Tool / resource registrations land here as Batches 2+ tasks ship.
-# Each submodule decorates against ``mcp_server`` at import time.
-# Batch 1: no tools yet — the bearer middleware is the only public
-# enforcement point for AC-8 / AC-14.
 
 # Build the ASGI sub-app AFTER all decorators have run. Late registration
 # (after this line) has no effect — see the docstring in ``server.py``.
