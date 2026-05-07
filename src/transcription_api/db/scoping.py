@@ -122,8 +122,23 @@ def _scoping_bypass(state: ORMExecuteState) -> bool:
 
 
 def _resolve_user_id(state: ORMExecuteState) -> uuid.UUID | None:
+    """Read ``session.info["user_id"]`` with a type guard.
+
+    G8 review-fix: a string or other non-UUID value silently slipping
+    into ``info["user_id"]`` would still satisfy ``is not None`` and
+    pass through the listener as a bind parameter, making cross-user
+    queries non-deterministic. The isinstance check raises
+    ``ScopingNotArmedError`` instead, surfacing the misconfiguration
+    at the call site that armed the wrong type.
+    """
     info = state.session.info if state.session is not None else {}
-    return info.get("user_id")
+    user_id = info.get("user_id")
+    if user_id is not None and not isinstance(user_id, uuid.UUID):
+        raise ScopingNotArmedError(
+            f"session.info['user_id'] is {type(user_id).__name__!r}, "
+            "expected uuid.UUID"
+        )
+    return user_id
 
 
 def _on_orm_execute(state: ORMExecuteState) -> None:
