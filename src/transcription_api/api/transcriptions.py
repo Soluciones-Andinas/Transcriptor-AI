@@ -126,32 +126,27 @@ def _stripped_500(
 def _models_loaded_or_503(request: Request) -> JSONResponse | None:
     """AC-15 short-circuit: 503 MODELS_NOT_LOADED if either model is not ready.
 
-    Reads ``app.state.{whisper,pyannote}_status`` (set by the lifespan
-    after model load attempts). On error, surfaces ``app.state.*_detail``
-    in the response body so the operator/client knows which HF condition
-    or CUDA failure triggered the degraded state. Returns ``None`` when
-    both models are ``"ready"`` so the caller can proceed.
+    Thin REST adapter over ``runtime.readiness.check_models_ready`` —
+    the precedence and detail-field semantics live there so the MCP
+    tool ``start_transcription`` and this REST endpoint stay in lock
+    step (G2 dedupe).
     """
-    state = request.app.state
-    whisper = getattr(state, "whisper_status", "loading")
-    pyannote = getattr(state, "pyannote_status", "loading")
-    if whisper == "ready" and pyannote == "ready":
-        return None
+    from ..runtime.readiness import check_models_ready
 
-    if whisper != "ready":
-        which = "whisper"
-        detail = getattr(state, "whisper_detail", None)
-    else:
-        which = "pyannote"
-        detail = getattr(state, "pyannote_detail", None)
+    res = check_models_ready(request.app.state)
+    if res.ready:
+        return None
 
     return JSONResponse(
         status_code=503,
         content={
             "detail": {
                 "error_code": "MODELS_NOT_LOADED",
-                "reason": f"{which} model is not ready; service is starting or degraded",
-                "detail": detail,
+                "reason": (
+                    f"{res.failing_model} model is not ready; "
+                    "service is starting or degraded"
+                ),
+                "detail": res.detail,
             }
         },
         headers={"Retry-After": "30"},

@@ -148,21 +148,20 @@ async def start_transcription(
         )
 
     # Models gate — short-circuit before opening a DB session if the
-    # lifespan never landed both models in 'ready'. Lazy import of
-    # main.app avoids the main <-> mcp circular import.
+    # lifespan never landed both models in 'ready'. Shared helper so
+    # the REST endpoint and this tool keep identical precedence /
+    # detail-field semantics (G2 dedupe). Lazy import of main.app
+    # avoids the main <-> mcp circular import.
     from ...main import app  # lazy: avoids main <-> mcp cycle
+    from ...runtime.readiness import check_models_ready
 
-    whisper_status = getattr(app.state, "whisper_status", "loading")
-    pyannote_status = getattr(app.state, "pyannote_status", "loading")
-    if whisper_status != "ready" or pyannote_status != "ready":
-        which = "whisper" if whisper_status != "ready" else "pyannote"
-        which_status = whisper_status if which == "whisper" else pyannote_status
-        detail = getattr(app.state, f"{which}_detail", None)
+    readiness = check_models_ready(app.state)
+    if not readiness.ready:
         raise_tool_error(
             "MODELS_NOT_LOADED",
-            f"{which} model is not ready (status={which_status})",
+            f"{readiness.failing_model} model is not ready",
             503,
-            detail=detail,
+            detail=readiness.detail,
         )
 
     whisper_model = app.state.whisper_model
