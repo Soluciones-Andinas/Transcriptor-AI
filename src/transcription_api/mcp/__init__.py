@@ -19,6 +19,7 @@ the app — keep new tool modules added to the imports below.
 # imports MUST happen before ``streamable_http_app()`` is invoked
 # (see comment at the build line below) — late registration has no
 # effect on the ASGI app.
+from . import resources as _resources  # noqa: F401, E402 — registers resources
 from . import tools as _tools  # noqa: F401, E402 — registers tools at import
 from .middleware import (
     BearerAuthMiddleware,
