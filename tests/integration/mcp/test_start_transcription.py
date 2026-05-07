@@ -28,7 +28,7 @@ GPU pipeline entirely, and assert on tool return + DB row + FS state.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from hashlib import sha256
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4

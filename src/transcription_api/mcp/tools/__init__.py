@@ -8,7 +8,9 @@ take effect (the SDK snapshots tools at build time).
 
 Add new tools here as their submodules ship.
 """
-from . import transcription  # noqa: F401 — registers start_transcription
-from . import upload  # noqa: F401 — registers request_upload_url
+from . import (
+    transcription,  # noqa: F401 — registers start_transcription
+    upload,  # noqa: F401 — registers request_upload_url
+)
 
 __all__ = ["transcription", "upload"]
