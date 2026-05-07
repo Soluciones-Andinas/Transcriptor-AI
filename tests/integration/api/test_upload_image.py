@@ -30,7 +30,12 @@ from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
-from tests.factories import make_bearer, make_upload_session, make_user
+from tests.factories import (
+    make_bearer,
+    make_transcription,
+    make_upload_session,
+    make_user,
+)
 from transcription_api.auth.mcp_bearer import generate_bearer
 
 pytestmark = pytest.mark.requires_docker
@@ -71,14 +76,18 @@ async def _seed_image_session(
     expected_size: int = 256,
     expected_mime: str = "image/png",
 ):
-    """Seed user + main bearer + image upload_session.
+    """Seed user + main bearer + transcription + image upload_session.
 
-    Returns ``(ephemeral_plaintext, upload_row)`` so callers can Authorize
-    against ``upload_bearer_hash`` and post against ``upload.nonce``.
+    The transcription is required because ``images.transcription_id`` is
+    NOT NULL — RF-MCP-01 ``request_upload_url(kind='image', ...)`` enforces
+    the parameter upstream. Returns ``(ephemeral_plaintext, upload_row)``
+    so callers can Authorize against ``upload_bearer_hash`` and post against
+    ``upload.nonce``.
     """
     user = await make_user(session, email=f"u-{secrets.token_hex(4)}@x")
     _, main_hash = generate_bearer()
     bearer_row = await make_bearer(session, user_id=user.id, token_hash=main_hash)
+    transcription = await make_transcription(session, user_id=user.id)
     ephemeral_plain = secrets.token_urlsafe(32)
     ephemeral_hash = sha256(ephemeral_plain.encode("ascii")).hexdigest()
     upload = await make_upload_session(
@@ -89,13 +98,17 @@ async def _seed_image_session(
         expected_size_bytes=expected_size,
         upload_bearer_hash=ephemeral_hash,
     )
-    # Set expected_mime_type — factory does not parametrize it.
+    # Bind the upload to the transcription + parametrize the expected MIME
+    # (factory does not expose either field).
     from transcription_api.db.models import UploadSession
 
     await session.execute(
         UploadSession.__table__.update()
         .where(UploadSession.id == upload.id)
-        .values(expected_mime_type=expected_mime)
+        .values(
+            expected_mime_type=expected_mime,
+            transcription_id=transcription.id,
+        )
     )
     await session.commit()
     await session.refresh(upload)

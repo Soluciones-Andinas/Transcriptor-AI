@@ -58,15 +58,19 @@ async def lifespan(app: FastAPI):
     # to start so the operator catches the misconfiguration immediately.
     _enforce_single_worker_or_warn()
 
-    # DATA_DIR/{models,cache,uploads} (RF-CACHE-01 step 2 + H-4 startup).
+    # DATA_DIR/{models,cache,uploads,blobs} (RF-CACHE-01 step 2 + H-4 startup +
+    # G1 review-fix: blobs_dir is the persistent image store written by
+    # POST /api/upload-image — a missing dir would 500 the first upload).
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     settings.cache_dir.mkdir(parents=True, exist_ok=True)
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+    settings.blobs_dir.mkdir(parents=True, exist_ok=True)
     logger.info(
-        "data_dirs_ready models_dir=%s cache_dir=%s uploads_dir=%s",
+        "data_dirs_ready models_dir=%s cache_dir=%s uploads_dir=%s blobs_dir=%s",
         settings.models_dir,
         settings.cache_dir,
         settings.uploads_dir,
+        settings.blobs_dir,
     )
 
     # H-4: purge orphan uploads from a previous crashed run. A fresh
