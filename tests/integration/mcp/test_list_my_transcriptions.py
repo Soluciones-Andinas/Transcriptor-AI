@@ -234,3 +234,42 @@ async def test_list_rejects_unknown_sort(session):
         assert _is_tool_error(exc.value, "INVALID_PARAMETER")
     finally:
         reset()
+
+
+# ---------------------------------------------------------------------------
+# G5 — pagination params hardening
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "bad_kwargs",
+    [
+        {"limit": -1, "offset": 0},
+        {"limit": 0, "offset": 0},
+        {"limit": 10, "offset": -1},
+        {"limit": 999, "offset": 0},  # > _LIST_LIMIT_MAX*2
+    ],
+)
+async def test_list_invalid_params_raise(session, bad_kwargs):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: spec §4 INVALID_PARAMETER — out-of-band pagination values
+    raise instead of being silently clamped. Drops the silent-clamp on
+    clearly-bug inputs (negative / zero limit, negative offset, absurd
+    over-cap) so a buggy caller gets a signal rather than degraded
+    pagination.
+    """
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import list_my_transcriptions
+
+    user, bearer = await _seed_user_with_bearer(
+        session, email_suffix=f"badparams-{secrets.token_hex(2)}"
+    )
+    await session.commit()
+
+    reset = _arm_context(user.id, bearer.id)
+    try:
+        with pytest.raises(McpError) as exc:
+            await list_my_transcriptions(**bad_kwargs)
+        assert _is_tool_error(exc.value, "INVALID_PARAMETER")
+    finally:
+        reset()

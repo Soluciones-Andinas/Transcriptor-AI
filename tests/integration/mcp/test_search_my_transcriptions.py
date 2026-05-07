@@ -229,3 +229,40 @@ async def test_search_clamps_oversized_limit_to_50(session):
 
     # 1 match but no error — proves the clamp didn't break the path.
     assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# G5 — search params hardening
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "bad_kwargs",
+    [
+        {"query": "arquitectura", "limit": -1},
+        {"query": "arquitectura", "limit": 0},
+        {"query": "arquitectura", "limit": 9999},  # > _SEARCH_LIMIT_MAX*2
+    ],
+)
+async def test_search_invalid_limit_raises(session, bad_kwargs):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: spec §4 INVALID_PARAMETER — out-of-band ``limit`` raises
+    instead of being silently clamped. Empty / oversize ``query`` is
+    already covered by ``test_search_empty_query_raises`` /
+    ``test_search_oversize_query_raises``; this drives the limit policy.
+    """
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import search_my_transcriptions
+
+    user, bearer = await _seed_user_with_bearer(
+        session, email_suffix=f"searchparams-{secrets.token_hex(2)}"
+    )
+    await session.commit()
+
+    reset = _arm_context(user.id, bearer.id)
+    try:
+        with pytest.raises(McpError) as exc:
+            await search_my_transcriptions(**bad_kwargs)
+        assert _is_tool_error(exc.value, "INVALID_PARAMETER")
+    finally:
+        reset()
