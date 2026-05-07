@@ -14,10 +14,47 @@ the same helper `/health` uses, so test environment matches runtime exactly.
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Generator
 
 import pytest
 import pytest_asyncio
+
+
+# ---------------------------------------------------------------------------
+# Cross-event-loop hygiene for module-level asyncio primitives
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _reset_orchestrator_lock_per_test():
+    """Reset the orchestrator's module-level ``asyncio.Lock`` before each test.
+
+    ``pipeline.orchestrator._orchestrator_lock`` wraps an ``asyncio.Lock``
+    that binds to the running event loop on first acquire. pytest-asyncio
+    creates a fresh loop per function-scoped test, so the lock from test
+    1's loop becomes unusable in test 2 with
+    ``RuntimeError: <Lock locked> is bound to a different event loop``.
+
+    The autouse fixture rebinds the inner ``asyncio.Lock`` per-test,
+    preserving the outer ``_OrchestrationLock`` object identity (so test
+    imports via ``from ..orchestrator import _orchestrator_lock`` keep
+    working) but resetting the loop affinity. Cheap (~µs); applied to
+    every test for safety, not just pipeline ones — auth callback tests
+    transitively import the orchestrator (via ``api.transcriptions``)
+    and hit the same trap if a prior pipeline test contaminated the lock.
+
+    Robust to import order: if the orchestrator module hasn't loaded yet
+    (rare; some pure-unit tests), the fixture no-ops.
+    """
+    try:
+        from transcription_api.pipeline import orchestrator
+    except ImportError:
+        yield
+        return
+
+    lock_obj = orchestrator._orchestrator_lock
+    lock_obj._lock = asyncio.Lock()
+    lock_obj._owner_task = None
+    yield
 
 
 # ---------------------------------------------------------------------------
