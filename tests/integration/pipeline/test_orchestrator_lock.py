@@ -94,7 +94,13 @@ async def test_orchestrator_serializes_two_concurrent_jobs_with_gpu_busy():
         assert exc.value.retry_after == 600
 
         result = await first
-        assert result == {"sentinel": "first"}
+        # SD-2 follow-up: the orchestrator augments the dict returned by the
+        # inner pipeline with ``metadata.processing_seconds`` on the happy
+        # path. This test exercises lock serialization (AC-6), not the shape
+        # of the return value (covered by AC-1 + SD-2 tests). Asserting only
+        # the sentinel keeps the invariant — the patched ``_run_pipeline``
+        # ran — without coupling to the orchestrator's augmentation contract.
+        assert result["sentinel"] == "first"
 
 
 async def test_orchestrator_lock_released_after_happy_completion():
