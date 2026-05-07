@@ -32,14 +32,6 @@ from ..session import mcp_request_session
 logger = logging.getLogger("transcription_api.mcp.tools.start")
 
 
-# Grace window past ``expires_at`` for the upload session. Hardcoded here
-# in G2; G8.4 promotes it to ``settings.upload_session_grace_seconds`` so
-# the operator can tune it without code changes. RF-MCP-02 step 6
-# documents the tolerance: it absorbs clock skew between the tool issuing
-# the URL and the REST endpoint receiving the bytes.
-_UPLOAD_GRACE_SECONDS = 30
-
-
 async def _load_upload_row(db, upload_id: str, user_id: UUID):
     """Resolve an uploaded session for the caller, raising typed errors.
 
@@ -88,7 +80,9 @@ async def _load_upload_row(db, upload_id: str, user_id: UUID):
             "upload not yet received or expired",
             404,
         )
-    grace_cutoff = row.expires_at + timedelta(seconds=_UPLOAD_GRACE_SECONDS)
+    grace_cutoff = row.expires_at + timedelta(
+        seconds=settings.upload_session_grace_seconds
+    )
     if datetime.now(timezone.utc) > grace_cutoff:
         raise_tool_error(
             "UPLOAD_SESSION_NOT_FOUND",

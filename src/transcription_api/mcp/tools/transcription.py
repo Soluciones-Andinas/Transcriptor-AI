@@ -31,7 +31,6 @@ from .search import (
     search_my_transcriptions,
 )
 from .start import (
-    _UPLOAD_GRACE_SECONDS,
     _cleanup_upload_dir,
     _consume_upload,
     _load_upload_row,
@@ -52,7 +51,6 @@ __all__ = [
     "_SEARCH_LIMIT_MAX",
     "_SEARCH_QUERY_MAX",
     "_TS_HEADLINE_OPTS",
-    "_UPLOAD_GRACE_SECONDS",
     "_build_fts_predicate",
     "_cleanup_upload_dir",
     "_consume_upload",

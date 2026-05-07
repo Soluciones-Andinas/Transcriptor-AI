@@ -33,7 +33,7 @@ from __future__ import annotations
 import hmac
 import imghdr
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -109,7 +109,11 @@ async def upload_audio(
             404, "UPLOAD_SESSION_NOT_FOUND", "session not found or already consumed"
         )
     # row.expires_at is timezone-aware (TIMESTAMPTZ); compare in UTC.
-    if row.expires_at < datetime.now(timezone.utc):
+    # G8.4 — honor settings.upload_session_grace_seconds (RF-MCP-02 §6).
+    grace_cutoff = row.expires_at + timedelta(
+        seconds=settings.upload_session_grace_seconds
+    )
+    if datetime.now(timezone.utc) > grace_cutoff:
         return _error_resp(
             404, "UPLOAD_SESSION_NOT_FOUND", "session expired"
         )
@@ -254,7 +258,10 @@ async def upload_image(
         return _error_resp(
             404, "UPLOAD_SESSION_NOT_FOUND", "session not found or already consumed"
         )
-    if row.expires_at < datetime.now(timezone.utc):
+    grace_cutoff = row.expires_at + timedelta(
+        seconds=settings.upload_session_grace_seconds
+    )
+    if datetime.now(timezone.utc) > grace_cutoff:
         return _error_resp(404, "UPLOAD_SESSION_NOT_FOUND", "session expired")
 
     # 3. Kind match — this endpoint is image-only.

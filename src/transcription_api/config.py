@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # casts identically (``::regconfig``). Kept configurable so future
     # multilingual deployments can override without code changes.
     fts_config: str = Field(default="spanish", alias="FTS_CONFIG")
+    # Grace window (seconds) past ``upload_sessions.expires_at`` before
+    # POST /api/upload(-image) and start_transcription mark the session
+    # as expired. RF-MCP-02 step 6 — absorbs clock skew between the tool
+    # issuing the URL and the REST endpoint receiving the bytes.
+    upload_session_grace_seconds: int = Field(
+        default=30, alias="UPLOAD_SESSION_GRACE_SECONDS", ge=0
+    )
     pipeline_timeout_seconds: int = Field(
         default=1800, alias="PIPELINE_TIMEOUT_SECONDS", gt=0
     )

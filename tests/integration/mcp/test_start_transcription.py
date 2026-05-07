@@ -695,3 +695,73 @@ async def test_start_transcription_passes_correct_kwargs_to_orchestrate(
     assert kwargs["whisper_model"] is not None
     assert kwargs["pyannote_pipeline"] is not None
     assert kwargs["cache_store"] is not None
+
+
+# ---------------------------------------------------------------------------
+# G8.4 — expires_at grace window (RF-MCP-02 §6)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "offset_sec,expect_404",
+    [
+        (-5, False),  # within window
+        (29, False),  # within grace (default 30s)
+        (45, True),   # past grace (45 > 30)
+    ],
+    ids=["within_window", "within_grace", "past_grace"],
+)
+async def test_start_transcription_honors_grace_window(
+    session, monkeypatch, tmp_path, offset_sec, expect_404
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: RF-MCP-02 §6 grace window — Given a session whose
+    ``expires_at`` is recent (negative offset = still inside window;
+    positive offset within grace; positive offset > grace), When
+    start_transcription runs, Then the tool either accepts the upload
+    (within window or grace) or raises UPLOAD_SESSION_NOT_FOUND
+    (past grace). Grace lives in ``settings.upload_session_grace_seconds``
+    so operators can tune it; default is 30s (G8.4 promotion from the
+    G2 hardcoded constant).
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from datetime import datetime, timedelta, timezone
+
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.db.models import UploadSession
+    from transcription_api.mcp.tools.start import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix=f"grace-{offset_sec}"
+    )
+    # Backdate / forward expires_at via direct UPDATE so the offset is
+    # measured from "now" at this point in the test.
+    target = datetime.now(timezone.utc) - timedelta(seconds=offset_sec)
+    await session.execute(
+        UploadSession.__table__.update()
+        .where(UploadSession.id == upload.id)
+        .values(expires_at=target)
+    )
+    await session.commit()
+    _stage_upload_file(tmp_path, upload.id)
+
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.start.orchestrate",
+        AsyncMock(return_value=_orchestrator_result()),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        if expect_404:
+            with pytest.raises(McpError) as exc:
+                await start_transcription(upload_id=str(upload.id))
+            assert _is_tool_error(exc.value, "UPLOAD_SESSION_NOT_FOUND")
+        else:
+            result = await start_transcription(upload_id=str(upload.id))
+            assert result["status"] == "completed"
+    finally:
+        reset_ctx()
+        reset_models()
