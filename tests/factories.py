@@ -145,15 +145,26 @@ async def make_upload_session(
     bearer_id: uuid.UUID,
     kind: str = "audio",
     expected_size_bytes: int = 4096,
+    upload_bearer_hash: str | None = None,
+    nonce: str | None = None,
+    expires_at_offset_seconds: int = 600,
 ) -> UploadSession:
+    """Capa 4 D-044: ``upload_bearer_hash`` is NOT NULL. Defaults to a
+    random sha256 hex if the caller does not need to assert against the
+    plaintext (Capa 1+2 callers don't care; Capa 4 callers pass an
+    explicit hash to test the bearer match path)."""
+    import hashlib
+
     up = UploadSession(
         id=uuid.uuid4(),
         user_id=user_id,
         bearer_id=bearer_id,
-        nonce=secrets.token_hex(16),
+        nonce=nonce or secrets.token_hex(16),
+        upload_bearer_hash=upload_bearer_hash
+        or hashlib.sha256(secrets.token_bytes(32)).hexdigest(),
         kind=kind,
         expected_size_bytes=expected_size_bytes,
-        expires_at=_utcnow() + timedelta(minutes=10),
+        expires_at=_utcnow() + timedelta(seconds=expires_at_offset_seconds),
     )
     session.add(up)
     await session.flush()
