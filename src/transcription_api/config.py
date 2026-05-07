@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     upload_session_grace_seconds: int = Field(
         default=30, alias="UPLOAD_SESSION_GRACE_SECONDS", ge=0
     )
+    # G10.3 — chunk size for streaming uploads (64 KiB), the +5% margin
+    # the audio handler applies before declaring FILE_TOO_LARGE, and the
+    # filename of the persisted raw blob under uploads/<id>/.
+    upload_chunk_bytes: int = Field(
+        default=65536, alias="UPLOAD_CHUNK_BYTES", gt=0
+    )
+    upload_size_margin: float = Field(
+        default=1.05, alias="UPLOAD_SIZE_MARGIN", gt=1.0
+    )
+    upload_raw_filename: str = Field(
+        default="original.bin", alias="UPLOAD_RAW_FILENAME"
+    )
     pipeline_timeout_seconds: int = Field(
         default=1800, alias="PIPELINE_TIMEOUT_SECONDS", gt=0
     )

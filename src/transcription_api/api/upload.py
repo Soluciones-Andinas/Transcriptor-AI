@@ -136,16 +136,16 @@ async def upload_audio(
     #    client sends exactly expected_size_bytes; the margin protects
     #    against compression-frame edge cases without inviting abuse.
     # ------------------------------------------------------------------
-    max_bytes = int(row.expected_size_bytes * 1.05)
+    max_bytes = int(row.expected_size_bytes * settings.upload_size_margin)
     target_dir = settings.uploads_dir / str(row.id)
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / "original.bin"
+    target = target_dir / settings.upload_raw_filename
 
     bytes_written = 0
     try:
         with target.open("wb") as fh:
             while True:
-                chunk = await file.read(64 * 1024)
+                chunk = await file.read(settings.upload_chunk_bytes)
                 if not chunk:
                     break
                 bytes_written += len(chunk)
@@ -271,7 +271,7 @@ async def upload_image(
         return _error_resp(401, "MCP_BEARER_INVALID", "bearer hash mismatch")
 
     # 5. Read body with the +5% margin cap.
-    max_bytes = int(row.expected_size_bytes * 1.05)
+    max_bytes = int(row.expected_size_bytes * settings.upload_size_margin)
     raw = await file.read(max_bytes + 1)
     if len(raw) > max_bytes:
         return _error_resp(

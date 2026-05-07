@@ -163,7 +163,7 @@ async def start_transcription(
     async with mcp_request_session(user_id) as db:
         row = await _load_upload_row(db, upload_id, user_id)
         upload_dir = settings.uploads_dir / str(row.id)
-        original = upload_dir / "original.bin"
+        original = upload_dir / settings.upload_raw_filename
 
         try:
             try:
