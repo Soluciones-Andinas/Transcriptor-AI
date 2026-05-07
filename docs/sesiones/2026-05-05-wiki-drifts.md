@@ -1096,6 +1096,54 @@ fragilidad del test cae (independencia de la API del client SDK).
 
 ---
 
+### D-048 🟢 Capa 4 Batch 6: AC-16 RED dividido en dos archivos por dependencia de Docker
+
+**Asumido (`plan` Batch 6 Task 6.1)**:
+
+```text
+Files:
+- tests/integration/api/test_transcriptions.py (extender RED): assert
+  app.openapi()["paths"]["/api/transcriptions"]["post"]["deprecated"]
+  is True.
+```
+
+Implica que los DOS asserts (OpenAPI flag + WARN log) viven en el
+mismo archivo, que tiene `pytestmark = pytest.mark.requires_docker`
+módulo-level porque otros tests del archivo necesitan testcontainers
+para sembrar bearers.
+
+**Reality (este batch)**: el assert de OpenAPI es decorator-time —
+no necesita DB ni testcontainers. En la máquina del operador
+(Mac sin Docker daemon) el archivo entero auto-skipea por el
+`requires_docker` marker, lo que destruye el RED proof local.
+
+**Resolución**: dividir AC-16 en dos archivos según costo de
+dependencia.
+
+- `tests/integration/api/test_legacy_deprecation.py` (NUEVO, sin
+  marker): contiene `test_post_transcriptions_marked_deprecated_in_openapi`.
+  Solo importa `transcription_api.main:app` y llama `app.openapi()`.
+  RED falla en local (`assert None is True`); GREEN pasa.
+- `tests/integration/api/test_transcriptions.py` (extendido,
+  hereda `requires_docker`): contiene
+  `test_post_transcriptions_emits_legacy_warn_on_invocation` que
+  usa el fixture `_seed_user_with_bearer` + caplog para validar
+  el WARN. Skipea local; corre en rig CI.
+
+**Acción pendiente**: ninguna — la cobertura del AC es la misma,
+solo cambió la distribución de archivos. El plan trace matrix de
+AC-16 ya apunta a ambos tests.
+
+**Lección**: cuando un test puede dividirse en una porción
+"static-time / sin DB" y otra "runtime / con DB", separarlos en
+archivos distintos da local-RED proof + remote-only-CI runtime
+proof sin sacrificar cobertura. La regla "module-level pytestmark"
+es estructural y no se override-ea per-test fácilmente — es más
+limpio crear un archivo nuevo. El plan no lo previó porque asumió
+que el operador tendría Docker.
+
+---
+
 ## Resumen ejecutivo
 
 **Total drifts identificados**: 40 (10 Capa 2 review + 2 Capa 3 Batch 1 + 3 operacionales rig + 1 Batch 3 + 1 Batch 4 + 2 Batch 5 + 4 Capa 3 review post-fix SD-3..6 + 2 Capa 4 spec audit + 1 Capa 4 Batch 0 + 2 Capa 4 Batch 1).

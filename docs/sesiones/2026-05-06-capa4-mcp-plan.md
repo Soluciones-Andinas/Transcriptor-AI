@@ -1148,7 +1148,7 @@ Contenido:
 | AC-13 | (verification only) | tests/integration/auth/test_me.py (existing) | |
 | AC-14 | B1.4 | tests/integration/mcp/test_mcp_middleware.py::test_mcp_valid_bearer_passes_middleware_and_bumps_last_used_at | RED `a7eeb01` / GREEN `78c25dd` |
 | AC-15 | B0.1, B0.2 | tests/integration/test_alembic.py::test_upload_sessions_has_upload_bearer_hash_after_upgrade | RED `388104e` / GREEN `bff8926` |
-| AC-16 | B6.1 | tests/integration/api/test_transcriptions.py | |
+| AC-16 | B6.1 | tests/integration/api/test_legacy_deprecation.py::test_post_transcriptions_marked_deprecated_in_openapi (no-Docker; local RED proof) + tests/integration/api/test_transcriptions.py::test_post_transcriptions_emits_legacy_warn_on_invocation (requires_docker; rig CI) | RED `8e61875` / GREEN `daeede2` |
 
 ---
 
