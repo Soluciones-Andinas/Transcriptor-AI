@@ -1,0 +1,395 @@
+"""``start_transcription`` tool — RF-MCP-02.
+
+Spec: SPEC-capa4-mcp-v1
+Covers (Batch 3):
+- AC-1 (closes the chain) — Tool consumes a pre-uploaded ``upload_id``,
+  invokes ``pipeline.orchestrator.orchestrate(...)``, flips the row to
+  ``status='consumed'``, removes the upload dir, and returns
+  ``{transcription_id, status='completed', cache_hit}``.
+- AC-9 — When the GPU lock is contended (orchestrate raises
+  ``GPUBusy``), the tool maps it to spec ``LOCK_BUSY`` (503).
+- AC-10 — When the upload row is expired or in ``status='requested'``
+  (POST /api/upload never landed), the tool returns
+  ``UPLOAD_SESSION_NOT_FOUND`` (404). Same code as unknown id (no
+  existence leak).
+- ``UPLOAD_SESSION_ALREADY_CONSUMED`` (409) — second
+  ``start_transcription`` for the same upload.
+- ``MODELS_NOT_LOADED`` (503) — whisper or pyannote still loading
+  / errored at lifespan time. Tool refuses BEFORE calling orchestrate.
+- ``PIPELINE_TIMEOUT`` (504) — orchestrator's ``PipelineTimeout``
+  bubbles through.
+
+Tests run unit-style (per D-047 pattern from Batch 1): import the
+tool function directly, arm the ``_current_user_id`` /
+``_current_bearer_id`` ContextVars, mock ``orchestrate`` to skip the
+GPU pipeline entirely, and assert on tool return + DB row + FS state.
+``requires_docker`` because of the Postgres testcontainer.
+"""
+from __future__ import annotations
+
+import secrets
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID, uuid4
+
+import pytest
+from sqlalchemy import select
+
+from tests.factories import make_bearer, make_upload_session, make_user
+from transcription_api.auth.mcp_bearer import generate_bearer
+
+pytestmark = pytest.mark.requires_docker
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+async def _seed_user_bearer_upload(
+    session,
+    *,
+    email_suffix: str,
+    status: str = "uploaded",
+    expires_at_offset_seconds: int = 600,
+):
+    """Seed user + bearer + uploaded upload_session; return everything."""
+    user = await make_user(session, email=f"u-{email_suffix}@x")
+    plaintext, token_hash = generate_bearer()
+    bearer = await make_bearer(session, user_id=user.id, token_hash=token_hash)
+    ephem_plain = secrets.token_urlsafe(32)
+    ephem_hash = sha256(ephem_plain.encode("ascii")).hexdigest()
+    upload = await make_upload_session(
+        session,
+        user_id=user.id,
+        bearer_id=bearer.id,
+        kind="audio",
+        expected_size_bytes=1024,
+        upload_bearer_hash=ephem_hash,
+        expires_at_offset_seconds=expires_at_offset_seconds,
+    )
+    if status != "requested":
+        # Promote to 'uploaded' / 'consumed' as needed (factory defaults
+        # to 'requested' via the column server_default).
+        from transcription_api.db.models import UploadSession
+
+        await session.execute(
+            UploadSession.__table__.update()
+            .where(UploadSession.id == upload.id)
+            .values(
+                status=status,
+                uploaded_at=datetime.now(timezone.utc) if status != "requested" else None,
+            )
+        )
+        await session.refresh(upload)
+    await session.commit()
+    return user, bearer, upload
+
+
+def _arm_context(user_id: UUID, bearer_id: UUID):
+    """Arm middleware ContextVars; returns reset callable."""
+    from transcription_api.mcp.middleware import (
+        _current_bearer_id,
+        _current_user_id,
+    )
+
+    user_token = _current_user_id.set(user_id)
+    bearer_token = _current_bearer_id.set(bearer_id)
+
+    def _reset():
+        _current_user_id.reset(user_token)
+        _current_bearer_id.reset(bearer_token)
+
+    return _reset
+
+
+def _arm_models_ready():
+    """Arm app.state with stub models so the tool's MODELS_NOT_LOADED gate
+    passes. Returns reset callable."""
+    from transcription_api.main import app
+
+    prior = (
+        getattr(app.state, "whisper_status", None),
+        getattr(app.state, "pyannote_status", None),
+        getattr(app.state, "whisper_model", None),
+        getattr(app.state, "pyannote_pipeline", None),
+    )
+    app.state.whisper_status = "ready"
+    app.state.pyannote_status = "ready"
+    app.state.whisper_model = MagicMock(name="whisper_stub")
+    app.state.pyannote_pipeline = MagicMock(name="pyannote_stub")
+
+    def _reset():
+        app.state.whisper_status = prior[0]
+        app.state.pyannote_status = prior[1]
+        app.state.whisper_model = prior[2]
+        app.state.pyannote_pipeline = prior[3]
+
+    return _reset
+
+
+def _stage_upload_file(tmp_data_dir, upload_id: UUID) -> None:
+    """Drop a dummy ``original.bin`` into the per-upload dir so the tool's
+    cleanup path actually has something to remove."""
+    target = tmp_data_dir / "uploads" / str(upload_id) / "original.bin"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"dummy-audio-bytes")
+
+
+def _is_tool_error(exc, expected_code: str) -> bool:
+    """The tool raises ``McpError`` whose ``data`` carries ``error_code``."""
+    from mcp.shared.exceptions import McpError
+
+    if not isinstance(exc, McpError):
+        return False
+    data = getattr(exc.error, "data", None) if hasattr(exc, "error") else None
+    return isinstance(data, dict) and data.get("error_code") == expected_code
+
+
+def _orchestrator_result(*, transcription_id=None):
+    """Canonical orchestrate() return shape (matches Capa 3 contract)."""
+    return {
+        "transcription_id": transcription_id or uuid4(),
+        "audio_hash": "deadbeef" * 8,
+        "language": "es",
+        "duration_seconds": 30.5,
+        "num_speakers": 2,
+        "text_content": "SPEAKER_00: hola\nSPEAKER_01: chau",
+        "segments": [],
+        "metadata": {"cache_hit": False, "processing_seconds": 5.2},
+    }
+
+
+# ---------------------------------------------------------------------------
+# AC-1 — happy path
+# ---------------------------------------------------------------------------
+async def test_start_transcription_happy_path(session, monkeypatch, tmp_path):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-1 — Given an uploaded session + ready models, When
+    start_transcription runs with orchestrate mocked, Then the tool
+    returns ``{transcription_id, status='completed', cache_hit=False}``,
+    the upload row flips to ``status='consumed'`` with ``consumed_at``
+    set, AND the per-upload dir is removed from disk.
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from transcription_api.db.models import UploadSession
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="happy"
+    )
+    _stage_upload_file(tmp_path, upload.id)
+    expected_tid = uuid4()
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(return_value=_orchestrator_result(transcription_id=expected_tid)),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        result = await start_transcription(upload_id=str(upload.id))
+    finally:
+        reset_ctx()
+        reset_models()
+
+    assert result["transcription_id"] == str(expected_tid)
+    assert result["status"] == "completed"
+    assert result["cache_hit"] is False
+
+    # DB invariants — committed by orchestrate's session AND the tool's
+    # consumed-flip session both before the function returns.
+    refreshed = (
+        await session.execute(
+            select(UploadSession).where(UploadSession.id == upload.id)
+        )
+    ).scalar_one()
+    await session.refresh(refreshed)
+    assert refreshed.status == "consumed"
+    assert refreshed.consumed_at is not None
+
+    # Filesystem invariant — upload dir is removed after orchestrate.
+    upload_dir = tmp_path / "uploads" / str(upload.id)
+    assert not upload_dir.exists(), f"upload dir leaked: {upload_dir}"
+
+
+async def test_start_transcription_happy_passes_cache_hit_through(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-1 — When orchestrate's metadata reports
+    ``cache_hit=True``, the tool surfaces it in the result so the MCP
+    client can tell the user "served from cache".
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="hit"
+    )
+    _stage_upload_file(tmp_path, upload.id)
+    cached = _orchestrator_result()
+    cached["metadata"]["cache_hit"] = True
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(return_value=cached),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        result = await start_transcription(upload_id=str(upload.id))
+    finally:
+        reset_ctx()
+        reset_models()
+
+    assert result["cache_hit"] is True
+
+
+# ---------------------------------------------------------------------------
+# AC-9 — GPU lock contention
+# ---------------------------------------------------------------------------
+async def test_start_transcription_gpu_busy_returns_lock_busy(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-9 — Given orchestrate raises ``GPUBusy(retry_after=N)``
+    (the GPU lock could not be acquired within LOCK_WAIT_SECONDS),
+    When start_transcription runs, Then the tool maps it to
+    ``LOCK_BUSY`` (spec §4) with ``retry_after`` in data. The upload
+    row stays at ``status='uploaded'`` (no premature consumed flip).
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.db.models import UploadSession
+    from transcription_api.mcp.tools.transcription import start_transcription
+    from transcription_api.pipeline.orchestrator import GPUBusy
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="busy"
+    )
+    _stage_upload_file(tmp_path, upload.id)
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(side_effect=GPUBusy(retry_after=600)),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        with pytest.raises(McpError) as exc:
+            await start_transcription(upload_id=str(upload.id))
+        assert _is_tool_error(exc.value, "LOCK_BUSY")
+        # Verify retry_after surfaced in error data for client backoff.
+        assert exc.value.error.data.get("retry_after") == 600
+    finally:
+        reset_ctx()
+        reset_models()
+
+    # Row still 'uploaded' — orchestrate failed BEFORE the consumed flip.
+    refreshed = (
+        await session.execute(
+            select(UploadSession).where(UploadSession.id == upload.id)
+        )
+    ).scalar_one()
+    await session.refresh(refreshed)
+    assert refreshed.status == "uploaded", (
+        "upload row must NOT flip to consumed when orchestrate fails"
+    )
+
+
+async def test_start_transcription_pipeline_timeout_returns_typed_error(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: spec §4 PIPELINE_TIMEOUT — Given orchestrate raises
+    ``PipelineTimeout(timeout_seconds=...)``, When start_transcription
+    runs, Then the tool maps it to ``PIPELINE_TIMEOUT`` with
+    timeout_seconds in data. Distinct from LOCK_BUSY — semantics differ
+    (acquired vs not).
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import start_transcription
+    from transcription_api.pipeline.orchestrator import PipelineTimeout
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="timeout"
+    )
+    _stage_upload_file(tmp_path, upload.id)
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(side_effect=PipelineTimeout(timeout_seconds=1800)),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        with pytest.raises(McpError) as exc:
+            await start_transcription(upload_id=str(upload.id))
+        assert _is_tool_error(exc.value, "PIPELINE_TIMEOUT")
+        assert exc.value.error.data.get("timeout_seconds") == 1800
+    finally:
+        reset_ctx()
+        reset_models()
+
+
+# ---------------------------------------------------------------------------
+# MODELS_NOT_LOADED — short-circuit before orchestrate
+# ---------------------------------------------------------------------------
+async def test_start_transcription_returns_models_not_loaded_when_whisper_errored(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: spec §4 MODELS_NOT_LOADED — Given app.state.whisper_status
+    is not 'ready' (lifespan caught a load error per AC-15 from Capa 3),
+    When start_transcription runs, Then the tool returns
+    MODELS_NOT_LOADED (503) BEFORE invoking orchestrate. Row stays
+    untouched.
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.main import app
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="no-models"
+    )
+    _stage_upload_file(tmp_path, upload.id)
+
+    orchestrate_mock = AsyncMock(side_effect=AssertionError("must NOT be called"))
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        orchestrate_mock,
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    # Override one model status post-arm to simulate the failure.
+    app.state.whisper_status = "error"
+    app.state.whisper_detail = "CUDA driver missing"
+    try:
+        with pytest.raises(McpError) as exc:
+            await start_transcription(upload_id=str(upload.id))
+        assert _is_tool_error(exc.value, "MODELS_NOT_LOADED")
+        orchestrate_mock.assert_not_called()
+    finally:
+        reset_ctx()
+        reset_models()
