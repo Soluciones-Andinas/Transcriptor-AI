@@ -39,11 +39,11 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 
 from ...config import settings
-from ...db.models import Image, Transcription, UploadSession
+from ...db.models import Image, Transcription, UploadSession, User
 from ...pipeline.cache import CacheStore
 from ...pipeline.orchestrator import GPUBusy, PipelineTimeout, orchestrate
 from ..errors import raise_tool_error
-from ..middleware import get_current_user_id
+from ..middleware import get_current_bearer_id, get_current_user_id
 from ..server import mcp_server
 from ..session import mcp_request_session
 
@@ -555,3 +555,35 @@ async def delete_transcription(transcription_id: str) -> dict[str, Any]:
         )
 
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# get_user_info — caller identity surface
+# ---------------------------------------------------------------------------
+@mcp_server.tool(name="get_user_info")
+async def get_user_info() -> dict[str, Any]:
+    """Return the caller's identity (user + active bearer).
+
+    No input args; the bearer middleware armed both ContextVars
+    (``_current_user_id`` and ``_current_bearer_id``) on the request,
+    and we serialize them + the User row's display fields.
+
+    Listener scoping: ``User`` does NOT carry a ``user_id`` column
+    (it IS the per-user root entity), so ``db.scoping._scoped_models``
+    excludes it and the listener leaves the SELECT alone — no
+    ``bypass_scoping`` needed (verified empirically).
+    """
+    user_id = get_current_user_id()
+    bearer_id = get_current_bearer_id()
+
+    async with mcp_request_session(user_id) as db:
+        user = (
+            await db.execute(select(User).where(User.id == user_id))
+        ).scalar_one()
+
+    return {
+        "user_id": str(user.id),
+        "email": user.email,
+        "display_name": user.display_name,
+        "bearer_id": str(bearer_id),
+    }
