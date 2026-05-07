@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     compute_type: str = Field(default="int8_float16", alias="COMPUTE_TYPE")
     max_upload_mb: int = Field(default=500, alias="MAX_UPLOAD_MB", gt=0)
     max_image_upload_mb: int = Field(default=25, alias="MAX_IMAGE_UPLOAD_MB", gt=0)
+    # Postgres ``regconfig`` name for full-text search. ``spanish`` is built
+    # into PG core; the GIN functional index in the Capa 1 migration is
+    # created on the same regconfig and only matches if the query side
+    # casts identically (``::regconfig``). Kept configurable so future
+    # multilingual deployments can override without code changes.
+    fts_config: str = Field(default="spanish", alias="FTS_CONFIG")
     pipeline_timeout_seconds: int = Field(
         default=1800, alias="PIPELINE_TIMEOUT_SECONDS", gt=0
     )
