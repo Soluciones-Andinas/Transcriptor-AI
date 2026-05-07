@@ -282,3 +282,65 @@ Once an ADR has status `Aceptada`, it is immutable. Replacement requires a new A
 ### Cache and tempfile hygiene
 
 Code that writes temporary audio files, normalized WAVs, or intermediate artifacts must clean them up in `finally` blocks. The filesystem cache at `graphify-out/cache/` and the runtime cache for transcriptions are governed by their own RFs (RF-TRX-06, RF-CACHE-02, RF-CACHE-03).
+
+---
+
+## 12. Testing Conventions
+
+### Pytest markers
+
+The suite uses four custom markers (registered in `pyproject.toml`) to gate tests by environment dependency. Each marker auto-skips when its prerequisite is unavailable on the host (resolution lives in `tests/conftest.py::pytest_collection_modifyitems`):
+
+| Marker | Skips when | Used for |
+|---|---|---|
+| `requires_docker` | `docker info` does not respond within ~5s | Tests using `testcontainers` (Postgres 16 ephemeral). Most Capa 1/2/3/4 integration tests. |
+| `requires_gpu` | `transcription_api.gpu.detect_accelerator()` reports no CUDA / MPS | Real WhisperX / pyannote model loaders. |
+| `requires_docker_gpu` | Either of the above is missing | Hybrid: pipeline tests that need both Postgres + GPU. Rig-only. |
+| `requires_ffmpeg` | `ffmpeg` or `ffprobe` not on PATH | Audio normalization tests. |
+
+The `e2e` marker is reserved for full-pipeline tests against real audio; deselect it in fast iterations.
+
+### Local invocation
+
+Default fast loop (skips Docker, GPU, ffmpeg gates that the dev box typically lacks):
+
+```
+.venv/bin/python -m pytest tests/ -q -m "not e2e and not requires_docker_gpu and not requires_ffmpeg"
+```
+
+To run a single integration file once Docker is up locally:
+
+```
+.venv/bin/python -m pytest tests/integration/mcp/test_start_transcription.py -v
+```
+
+`ruff check src/ tests/` is the lint gate; the CI workflow enforces both lint and the test suite.
+
+### CI workflow
+
+`.github/workflows/test.yml` (G14 review-fix) runs on every pull request and on push to `master`:
+
+- `ubuntu-latest` runner with Python 3.11, pip cache enabled.
+- Installs `ffmpeg` and `pip install -e ".[dev]"` (the `[pipeline]` heavy extras stay out — Capa 3 tests mock at the loader seam per D-030).
+- Lints (`ruff check src/ tests/`) and runs the test suite with `-m "not e2e and not requires_gpu and not requires_docker_gpu"`. The `requires_docker` tests DO run because the runner has Docker available; testcontainers spins Postgres on demand.
+
+Because the dev box does not have Docker, ~200 tests skip locally and only run on the rig CI. A green local run is necessary but not sufficient — wait for the GitHub Actions check before merging.
+
+### Test layout
+
+```
+tests/
+  conftest.py                 - top-level: marker skip resolution + Postgres testcontainer fixture (`session`, `engine`)
+  factories.py                - async factories for User, McpBearer, Transcription, Image, UploadSession, OAuthToken
+  integration/
+    conftest.py               - shared helpers: assert_tool_error fixture, arm_context, seed_user_with_bearer (G11.7)
+    api/                      - REST endpoint tests
+    auth/                     - Microsoft Entra OAuth + bearer middleware
+    mcp/                      - MCP tool / resource handlers (most are requires_docker)
+  unit/
+    db/                       - scoping listener + model classification
+    mcp/                      - pure-function helpers (FTS predicate, lookup, serializers)
+    pipeline/                 - Capa 3 pipeline at unit level (mocked loaders)
+```
+
+When adding a new test, prefer the lowest level that still provides coverage. Module-level `pytestmark = pytest.mark.requires_docker` is structural — splitting a test into a unit-level "static check" and an integration-level "runtime check" is cleaner than fighting the marker (lesson from D-048).
