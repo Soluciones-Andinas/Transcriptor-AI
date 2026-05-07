@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from ...config import settings
 from ...db.models import Image, Transcription, UploadSession
@@ -491,3 +491,67 @@ async def get_transcription(transcription_id: str) -> dict[str, Any]:
         ).scalars().all()
 
     return _serialize_full(row, list(images))
+
+
+# ---------------------------------------------------------------------------
+# delete_transcription — RF-MCP-09
+# ---------------------------------------------------------------------------
+@mcp_server.tool(name="delete_transcription")
+async def delete_transcription(transcription_id: str) -> dict[str, Any]:
+    """Soft-delete the caller's transcription + cascade to its images (AC-11).
+
+    Soft-delete via ``deleted_at = now()`` so the row stays around for
+    audit / undelete (Capa 5 may add a hard-purge job). Cascade applies
+    to any non-deleted attached Image rows: keeps the per-user
+    soft-delete contract symmetric (a deleted parent never has visible
+    children).
+
+    Idempotent by listener convention: a second call's UPDATE filters
+    out the now-soft-deleted row (``WHERE deleted_at IS NULL``); zero
+    rowcount -> NOT_FOUND with the same body as cross-user / unknown
+    (no existence-leak across the three causes).
+    """
+    user_id = get_current_user_id()
+
+    try:
+        tid = UUID(transcription_id)
+    except (TypeError, ValueError):
+        raise_tool_error(
+            "INVALID_PARAMETER",
+            f"transcription_id is not a valid UUID: {transcription_id!r}",
+            400,
+        )
+
+    async with mcp_request_session(user_id) as db:
+        # Listener AND-injects user_id; cross-user UPDATEs filter out
+        # the foreign row, the rowcount stays zero, and we return
+        # NOT_FOUND below — no existence leak.
+        result = await db.execute(
+            update(Transcription)
+            .where(
+                Transcription.id == tid,
+                Transcription.deleted_at.is_(None),
+            )
+            .values(deleted_at=func.now())
+        )
+        if result.rowcount == 0:
+            raise_tool_error(
+                "TRANSCRIPTION_NOT_FOUND",
+                "transcription not found",
+                404,
+            )
+
+        # Cascade — keep the per-user soft-delete contract symmetric so
+        # `get_transcription` of the deleted parent never returns its
+        # (now-orphan) images. Image carries user_id denormalized so
+        # the listener applies the same scoping here.
+        await db.execute(
+            update(Image)
+            .where(
+                Image.transcription_id == tid,
+                Image.deleted_at.is_(None),
+            )
+            .values(deleted_at=func.now())
+        )
+
+    return {"ok": True}

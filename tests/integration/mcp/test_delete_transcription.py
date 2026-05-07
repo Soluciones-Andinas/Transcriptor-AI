@@ -16,7 +16,6 @@ Tests run unit-style; ``requires_docker`` for the testcontainer.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -115,7 +114,6 @@ async def test_delete_cascades_soft_delete_to_images(session):
     queries respect the same per-user soft-delete contract.
     """
     from tests.factories import make_image
-
     from transcription_api.db.models import Image
     from transcription_api.db.scoping import bypass_scoping
     from transcription_api.mcp.tools.transcription import delete_transcription
@@ -126,12 +124,8 @@ async def test_delete_cascades_soft_delete_to_images(session):
     row = await make_transcription(
         session, user_id=user.id, audio_hash="cas-" + "0" * 60
     )
-    img1 = await make_image(
-        session, transcription_id=row.id, user_id=user.id
-    )
-    img2 = await make_image(
-        session, transcription_id=row.id, user_id=user.id
-    )
+    await make_image(session, transcription_id=row.id, user_id=user.id)
+    await make_image(session, transcription_id=row.id, user_id=user.id)
     await session.commit()
 
     reset = _arm_context(user.id, bearer.id)
@@ -284,5 +278,3 @@ async def test_delete_unknown_id_returns_not_found(session):
         reset()
 
 
-# Suppress unused-fixture warning (datetime/timezone not used directly here).
-del datetime, timezone
