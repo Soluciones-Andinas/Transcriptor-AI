@@ -36,10 +36,10 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ...config import settings
-from ...db.models import UploadSession
+from ...db.models import Transcription, UploadSession
 from ...pipeline.cache import CacheStore
 from ...pipeline.orchestrator import GPUBusy, PipelineTimeout, orchestrate
 from ..errors import raise_tool_error
@@ -48,6 +48,37 @@ from ..server import mcp_server
 from ..session import mcp_request_session
 
 logger = logging.getLogger("transcription_api.mcp.tools.transcription")
+
+
+# ---------------------------------------------------------------------------
+# Sort whitelist for list_my_transcriptions (AC-3). Closed enum so an
+# unrecognized value 400s before hitting the DB; mapping to ORM column
+# expressions keeps the dispatch terse.
+# ---------------------------------------------------------------------------
+_LIST_SORTS: dict[str, Any] = {
+    "created_at_desc": Transcription.created_at.desc(),
+    "created_at_asc": Transcription.created_at.asc(),
+    "duration_desc": Transcription.duration_seconds.desc(),
+}
+_LIST_LIMIT_MAX = 100
+
+
+def _serialize_summary(row: Transcription) -> dict[str, Any]:
+    """Compact row representation used by list_my_transcriptions.
+
+    Excludes the heavy ``segments`` / ``text_content`` fields — clients
+    use ``get_transcription`` for the full payload. Keeps list responses
+    bounded so a 100-row page stays under ~10 KB.
+    """
+    return {
+        "id": str(row.id),
+        "audio_hash": row.audio_hash,
+        "original_filename": row.original_filename,
+        "duration_seconds": float(row.duration_seconds),
+        "language": row.language,
+        "num_speakers": row.num_speakers,
+        "created_at": row.created_at.isoformat(),
+    }
 
 
 @mcp_server.tool(name="start_transcription")
@@ -204,4 +235,72 @@ async def start_transcription(
         "transcription_id": str(result["transcription_id"]),
         "status": "completed",
         "cache_hit": result.get("metadata", {}).get("cache_hit", False),
+    }
+
+
+# ---------------------------------------------------------------------------
+# list_my_transcriptions — RF-MCP-04
+# ---------------------------------------------------------------------------
+@mcp_server.tool(name="list_my_transcriptions")
+async def list_my_transcriptions(
+    limit: int = 20,
+    offset: int = 0,
+    sort: str = "created_at_desc",
+) -> dict[str, Any]:
+    """Paginated list of the caller's transcriptions (AC-3).
+
+    Cross-user isolation comes from the ADR-014/015 listener: the
+    SELECT body has NO ``WHERE user_id`` clause; the listener
+    AND-injects it from ``mcp_request_session(user_id)``.
+
+    Args:
+        limit: max items per page; clamped to ``_LIST_LIMIT_MAX``.
+        offset: rows to skip (zero-based).
+        sort: one of ``created_at_desc`` (default) /
+            ``created_at_asc`` / ``duration_desc``. Anything else ->
+            INVALID_PARAMETER (400).
+
+    Returns:
+        ``{items: [<summary>...], total, limit, offset}``. Soft-deleted
+        rows excluded from BOTH ``items`` and ``total``.
+    """
+    sort_clause = _LIST_SORTS.get(sort)
+    if sort_clause is None:
+        raise_tool_error(
+            "INVALID_PARAMETER",
+            f"sort {sort!r} not in {sorted(_LIST_SORTS)}",
+            400,
+        )
+
+    if limit > _LIST_LIMIT_MAX:
+        limit = _LIST_LIMIT_MAX
+    if limit < 1:
+        limit = 1
+    if offset < 0:
+        offset = 0
+
+    user_id = get_current_user_id()
+    async with mcp_request_session(user_id) as db:
+        items = (
+            await db.execute(
+                select(Transcription)
+                .where(Transcription.deleted_at.is_(None))
+                .order_by(sort_clause)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars().all()
+        total = (
+            await db.execute(
+                select(func.count(Transcription.id)).where(
+                    Transcription.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one()
+
+    return {
+        "items": [_serialize_summary(row) for row in items],
+        "total": int(total),
+        "limit": limit,
+        "offset": offset,
     }
