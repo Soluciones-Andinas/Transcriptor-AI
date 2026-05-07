@@ -26,9 +26,16 @@ jobs:
     # These are TEST-ONLY values, deliberately fixed and obviously fake;
     # they are NOT production secrets. Production values come from the
     # rig's `.env` file (never committed).
+    #
+    # DATA_DIR points to a writable path on the runner. Default `/data`
+    # is owned by root on GitHub Actions runners (PermissionError on
+    # mkdir). The FastAPI lifespan calls `settings.{models,cache,
+    # uploads,blobs}_dir.mkdir(...)`, so any test going through lifespan
+    # via asgi-lifespan needs DATA_DIR to be writable.
     env:
       JWT_SECRET: ci-test-jwt-secret-do-not-use-in-prod-padding-padding
       OAUTH_TOKEN_ENC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      DATA_DIR: ${{ runner.temp }}/transcription-data
 
     steps:
       - uses: actions/checkout@v4
