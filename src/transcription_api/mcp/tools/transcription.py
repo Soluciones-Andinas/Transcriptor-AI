@@ -45,6 +45,7 @@ from ...pipeline.cache import CacheStore
 from ...pipeline.orchestrator import GPUBusy, PipelineTimeout, orchestrate
 from .._clamp import clamp_or_raise
 from ..errors import raise_tool_error
+from ..lookup import lookup_owned_or_404
 from ..middleware import get_current_bearer_id, get_current_user_id
 from ..server import mcp_server
 from ..session import mcp_request_session
@@ -517,24 +518,16 @@ async def get_transcription(transcription_id: str) -> dict[str, Any]:
         )
 
     async with mcp_request_session(user_id) as db:
-        # Listener AND-injects user_id; cross-user lookups yield None
-        # which we collapse to NOT_FOUND. The deleted_at filter does
-        # the same for soft-deleted rows of the OWNER (no leak about
-        # the row's history).
-        row = (
-            await db.execute(
-                select(Transcription).where(
-                    Transcription.id == tid,
-                    Transcription.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-        if row is None:
-            raise_tool_error(
-                "TRANSCRIPTION_NOT_FOUND",
-                "transcription not found",
-                404,
-            )
+        # Listener AND-injects user_id; cross-user / unknown / soft-deleted
+        # all collapse to TRANSCRIPTION_NOT_FOUND via the shared helper
+        # (G4 review-fix — privacy invariant lives in lookup_owned_or_404).
+        row = await lookup_owned_or_404(
+            db,
+            Transcription,
+            tid,
+            error_code="TRANSCRIPTION_NOT_FOUND",
+            error_message="transcription not found",
+        )
 
         # Fetch attached images (also user-scoped + soft-delete-filtered).
         # Image carries user_id denormalized so the listener applies.

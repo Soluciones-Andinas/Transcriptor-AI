@@ -30,11 +30,10 @@ from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
-
 from ...config import settings
 from ...db.models import Transcription, UploadSession
 from ..errors import raise_tool_error
+from ..lookup import lookup_owned_or_404
 from ..middleware import get_current_bearer_id, get_current_user_id
 from ..server import mcp_server
 from ..session import mcp_request_session
@@ -142,19 +141,15 @@ async def request_upload_url(
                     f"transcription_id is not a valid UUID: {transcription_id!r}",
                     400,
                 )
-            owner_id = (
-                await db.execute(
-                    select(Transcription.id).where(
-                        Transcription.id == tid_uuid
-                    )
-                )
-            ).scalar_one_or_none()
-            if owner_id is None:
-                raise_tool_error(
-                    "TRANSCRIPTION_NOT_FOUND",
-                    "transcription not found",
-                    404,
-                )
+            # Cross-user / unknown / soft-deleted all collapse to
+            # TRANSCRIPTION_NOT_FOUND via the shared helper (G4 review-fix).
+            await lookup_owned_or_404(
+                db,
+                Transcription,
+                tid_uuid,
+                error_code="TRANSCRIPTION_NOT_FOUND",
+                error_message="transcription not found",
+            )
 
         upload_id = uuid4()
         nonce = secrets.token_urlsafe(32)
