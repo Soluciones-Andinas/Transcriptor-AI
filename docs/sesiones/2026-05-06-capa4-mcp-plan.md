@@ -1138,12 +1138,12 @@ Contenido:
 | AC-3 | B4.1 | tests/integration/mcp/test_list_my_transcriptions.py (5 tests: cross-user isolation + pagination + limit clamp + soft-delete filter + sort whitelist) | RED `772799f` / GREEN `a4e92f8` |
 | AC-4 | B4.2 | tests/integration/mcp/test_search_my_transcriptions.py (5 tests: FTS rank+snippet + cross-user + empty/oversized query + limit clamp) | RED `1ea3ef0` / GREEN `3befcf2` |
 | AC-5 | B4.3 | tests/integration/mcp/test_get_transcription.py (5 tests: own full payload + cross-user 404 + unknown 404 + soft-deleted 404 + invalid uuid) | RED `677645d` / GREEN `0d58662` |
-| AC-6 | B5.1 | tests/integration/mcp/test_resources.py | |
-| AC-7 | B2.4 + B5.1 | tests/integration/mcp/test_resources.py::test_image_resource | |
+| AC-6 | B5.1 | tests/integration/mcp/test_resources.py (transcription:// resource: full payload + cross-user 404) | RED `b8a5609` / GREEN `249ed8c` |
+| AC-7 | B2.4 + B5.1 | tests/integration/mcp/test_resources.py (image_resource: bytes + cross-user/unknown/invalid-uuid -> IMAGE_NOT_FOUND/INVALID_PARAMETER) | RED `b8a5609` / GREEN `249ed8c` |
 | AC-8 | B1.3 + B1.4 | tests/integration/mcp/test_mcp_middleware.py (4 tests cubren no-header / malformed / unknown / revoked) | RED `a7eeb01` / GREEN `78c25dd` |
 | AC-9 | B3.1 | tests/integration/mcp/test_start_transcription.py::test_start_transcription_gpu_busy_returns_lock_busy + ::test_start_transcription_pipeline_timeout_returns_typed_error (orchestrate raises GPUBusy / PipelineTimeout -> tool maps to LOCK_BUSY / PIPELINE_TIMEOUT with structured fields) | RED `b542db9` / GREEN `1d1600b` |
 | AC-10 | B3.3 + B2.4 | tests/integration/api/test_upload.py (B2.4 side: unknown_nonce + expired_session) + tests/integration/mcp/test_start_transcription.py (B3.3 side: expired / status='requested' / unknown_id all -> UPLOAD_SESSION_NOT_FOUND) | RED `e5df696`+`b1ed27d` / GREEN `63ded4f`+`1d1600b` |
-| AC-11 | B5.2 | tests/integration/mcp/test_delete.py | |
+| AC-11 | B5.2 | tests/integration/mcp/test_delete_transcription.py (6 tests: own soft-delete + cascade images + idempotente NOT_FOUND + cross-user NOT_FOUND + unknown NOT_FOUND + invalid uuid) | RED `c3f7d91` / GREEN `4aa794c` |
 | AC-12 | B1.1 | tests/unit/mcp/test_mcp_module_imports.py + tests/integration/mcp/test_mcp_mount.py | RED `a1c906d` / GREEN `3425713` |
 | AC-13 | (verification only) | tests/integration/auth/test_me.py (existing) | |
 | AC-14 | B1.4 | tests/integration/mcp/test_mcp_middleware.py::test_mcp_valid_bearer_passes_middleware_and_bumps_last_used_at | RED `a7eeb01` / GREEN `78c25dd` |
