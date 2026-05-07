@@ -1140,13 +1140,13 @@ Contenido:
 | AC-5 | B4.3 | tests/integration/mcp/test_get_transcription.py | |
 | AC-6 | B5.1 | tests/integration/mcp/test_resources.py | |
 | AC-7 | B2.4 + B5.1 | tests/integration/mcp/test_resources.py::test_image_resource | |
-| AC-8 | B1.3 + B1.4 | tests/integration/mcp/test_mcp_middleware.py | |
+| AC-8 | B1.3 + B1.4 | tests/integration/mcp/test_mcp_middleware.py (4 tests cubren no-header / malformed / unknown / revoked) | RED `a7eeb01` / GREEN `78c25dd` |
 | AC-9 | B3.1 | tests/integration/mcp/test_start_transcription.py::test_lock_busy | |
 | AC-10 | B3.3 + B2.4 | tests/integration/mcp/test_start_transcription.py + tests/integration/api/test_upload.py | |
 | AC-11 | B5.2 | tests/integration/mcp/test_delete.py | |
-| AC-12 | B1.1 | tests/integration/mcp/test_mcp_mount.py | |
+| AC-12 | B1.1 | tests/unit/mcp/test_mcp_module_imports.py + tests/integration/mcp/test_mcp_mount.py | RED `a1c906d` / GREEN `3425713` |
 | AC-13 | (verification only) | tests/integration/auth/test_me.py (existing) | |
-| AC-14 | B1.4 | tests/integration/mcp/test_mcp_middleware.py | |
+| AC-14 | B1.4 | tests/integration/mcp/test_mcp_middleware.py::test_mcp_valid_bearer_passes_middleware_and_bumps_last_used_at | RED `a7eeb01` / GREEN `78c25dd` |
 | AC-15 | B0.1, B0.2 | tests/integration/test_alembic.py::test_upload_sessions_has_upload_bearer_hash_after_upgrade | RED `388104e` / GREEN `bff8926` |
 | AC-16 | B6.1 | tests/integration/api/test_transcriptions.py | |
 

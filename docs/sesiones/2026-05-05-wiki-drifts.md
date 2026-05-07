@@ -1015,15 +1015,96 @@ file".
 
 ---
 
+### D-046 🟡 Capa 4 Batch 1: plan asume `BearerInvalid` / `BearerRevoked` exceptions que no existen
+
+**Asumido (`plan` Batch 1 Task 1.4 middleware skeleton)**:
+
+```python
+from ..auth.mcp_bearer import verify_bearer, BearerInvalid, BearerRevoked
+...
+try:
+    bearer_row = await verify_bearer(session, plaintext)
+except BearerInvalid:
+    raise McpAuthError("MCP_BEARER_INVALID")
+except BearerRevoked:
+    raise McpAuthError("MCP_BEARER_REVOKED")
+```
+
+**Reality (`auth/mcp_bearer.py` actual)**: `verify_bearer` retorna
+`User | None` (no exceptions tipadas). Además filtra por
+`revoked_at IS NULL`, así que un bearer revoked retorna `None` igual
+que un bearer inexistente — el caller no puede distinguir
+`MCP_BEARER_INVALID` de `MCP_BEARER_REVOKED` con esa API.
+
+**Resolución (este batch, commit T1.4 GREEN)**: el middleware `mcp/middleware.py`
+hace su propia query directa contra `mcp_bearers` (con `bypass_scoping`
+para la lookup cross-user) que NO filtra por `revoked_at`. Inspecciona
+el campo después: `row is None` → `INVALID`; `row.revoked_at is not None`
+→ `REVOKED`; sino → ok + bump `last_used_at`. El `verify_bearer` de Capa 2
+queda intacto (§7 prohibe modificar `auth/`).
+
+**Acción pendiente**: ninguna. Si una Capa futura quiere unificar la
+distinción INVALID-vs-REVOKED en una sola helper, mover esa lógica a
+`auth/mcp_bearer.py` con un nuevo `verify_bearer_with_status()` que
+retorne `("ok"|"invalid"|"revoked", User|None)`. Mientras tanto, los
+dos call-sites (web cookie auth + MCP middleware) tienen contracts
+distintos y duplicar 8 LOC es cheaper que el refactor.
+
+**Lección**: planes que listan imports específicos de helpers de capas
+previas son hipótesis, no contratos. Validar la API real con `grep` o
+`python -c "from X import Y"` antes de redactar el GREEN skeleton.
+
+---
+
+### D-047 🟢 Capa 4 Batch 1: tests del middleware usan raw POSTs en vez del MCP client SDK
+
+**Asumido (`plan` Batch 1 Task 1.3 RED tests)**:
+
+```python
+async def test_mcp_revoked_bearer_returns_401(mcp_client_with_bearer, ...):
+    resp = await mcp_client_with_bearer(plaintext).call_tool("_test_ping", {})
+    assert resp.error.data["error_code"] == "MCP_BEARER_REVOKED"
+```
+
+Implica usar el MCP client SDK (`mcp.client.streamable_http`) + un
+fixture factory `mcp_client_with_bearer(plaintext)` + un test-only tool
+`_test_ping` registrado en el server.
+
+**Reality (este batch, T1.3 RED)**: implementé los tests con raw POSTs
+via `httpx.ASGITransport` + un payload JSON-RPC `initialize` minimal.
+La aserción es sobre el status code (`!= 401` proves middleware passed)
+y el body (`detail.error_code` para 401s). Sin client SDK, sin tool
+helper, sin fixture factory.
+
+**Resolución**: cubrir el mismo contract con menos infra. AC-8 sale
+testeado por status + error_code (qué importa). AC-14 sale testeado
+por DB re-fetch del row antes/después del POST (`last_used_at` se
+bumpea durante AUTH del middleware, independiente de si la tool
+realmente se ejecuta después). El `_test_ping` tool quedó deferido
+hasta que algún batch posterior lo necesite.
+
+**Acción pendiente**: ninguna. Si Batch 4 (`get_user_info` etc.)
+quisiera testar el SDK end-to-end (handshake completo + listResources
++ callTool), entonces el `mcp_client` fixture vale crear. Hasta
+entonces, raw POSTs son el camino más simple.
+
+**Lección**: cuando un plan especifica una API de cliente para tests
+(fixture factory + SDK client + decorated test tool) y la batch en
+cuestión solo necesita testar el LAYER de auth, simplificar el test
+a raw HTTP es ROI > 1. La cobertura del contract es la misma; la
+fragilidad del test cae (independencia de la API del client SDK).
+
+---
+
 ## Resumen ejecutivo
 
-**Total drifts identificados**: 38 (10 Capa 2 review + 2 Capa 3 Batch 1 + 3 operacionales rig + 1 Batch 3 + 1 Batch 4 + 2 Batch 5 + 4 Capa 3 review post-fix SD-3..6 + 2 Capa 4 spec audit + 1 Capa 4 Batch 0).
+**Total drifts identificados**: 40 (10 Capa 2 review + 2 Capa 3 Batch 1 + 3 operacionales rig + 1 Batch 3 + 1 Batch 4 + 2 Batch 5 + 4 Capa 3 review post-fix SD-3..6 + 2 Capa 4 spec audit + 1 Capa 4 Batch 0 + 2 Capa 4 Batch 1).
 
-**Severidad** (post-actualización 2026-05-06 incluyendo Capa 4 spec audit + Batch 0):
+**Severidad** (post-actualización 2026-05-06 incluyendo Capa 4 spec audit + Batches 0+1):
 - 🔴 CRITICAL: 3 (D-001 hardware, D-008 subagent sandbox, D-014 listener fail-closed)
 - 🟠 HIGH: 7 (D-002, D-004, D-006, D-007, D-009, D-031, D-032, D-044)
-- 🟡 MEDIUM: 14 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033, D-043)
-- 🟢 LOW: 14 (D-012, D-013, D-019, D-020, D-022, D-034, D-035, D-036, D-037, D-038, D-039, D-040, D-041, D-045)
+- 🟡 MEDIUM: 15 (D-003, D-005, D-010, D-011, D-015, D-016, D-017, D-018, D-021, D-029, D-030, D-033, D-043, D-046)
+- 🟢 LOW: 15 (D-012, D-013, D-019, D-020, D-022, D-034, D-035, D-036, D-037, D-038, D-039, D-040, D-041, D-045, D-047)
 
 **Drifts ya cerrados**: 35/37 (post sesión wiki 2026-05-06).
 
