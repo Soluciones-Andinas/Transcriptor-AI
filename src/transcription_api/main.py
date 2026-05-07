@@ -402,6 +402,16 @@ from .api import transcriptions_router  # noqa: E402
 app.include_router(transcriptions_router)
 
 
+# Capa 4 — mount the MCP server as an ASGI sub-app at /mcp. The
+# Streamable-HTTP transport (ADR-013) lives entirely under that prefix;
+# tools and resources are registered against ``mcp_server`` in
+# ``transcription_api.mcp`` submodules at import time, BEFORE the ASGI
+# app is built (see ``mcp/__init__.py``).
+from .mcp import mcp_app  # noqa: E402
+
+app.mount("/mcp", mcp_app)
+
+
 # ---------------------------------------------------------------------------
 # ERR-2 — pool exhaustion → HTTP 503 with stable error_code.
 # ---------------------------------------------------------------------------
