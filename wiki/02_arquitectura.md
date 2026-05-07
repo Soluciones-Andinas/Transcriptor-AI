@@ -52,7 +52,7 @@ C4Container
         Container(stt, "Motor de Transcripción", "WhisperX + Whisper large-v3 (int8_float16)", "Texto + timestamps por palabra")
         Container(diar, "Motor de Diarización", "pyannote 3.1", "Segmentos por hablante")
         Container(merge, "Ensamblador", "Lógica Python", "Asocia palabras a hablantes")
-        Container(mcp, "MCP Server", "Python mcp SDK + auth middleware", "Tools + Resources OAuth-protected")
+        Container(mcp, "MCP Server", "FastMCP (Streamable HTTP) montado en /mcp + bearer middleware", "Tools + Resources con auth ephemeral bearer")
         ContainerDb(pg, "PostgreSQL 16", "SQL", "users, oauth_tokens, transcriptions, images")
         ContainerDb(cache, "Caché Filesystem", "FS local", "Por audio_hash, TTL 24h")
         ContainerDb(blobs, "Blobs Filesystem", "FS local", "Modelos, uploads temp, image files")
@@ -133,7 +133,7 @@ sequenceDiagram
 |---|---|---|---|
 | UI React + Vite | Onboarding visual: login, mostrar config MCP | Cookie de sesión web | Backend OAuth endpoints |
 | FastAPI App (REST) | Auth flow, uploads binarios, healthcheck, sirve UI estática | Sesiones web, uploads en `/data/uploads/` | Postgres, Microsoft Entra |
-| MCP Server | Tools + Resources, lifecycle de transcripciones | Bearer tokens en Postgres | Postgres, pipeline, caché |
+| MCP Server | Tools + Resources, lifecycle de transcripciones. Montado en `/mcp` con `BearerAuthMiddleware` que valida `Authorization: Bearer <plaintext>` contra `mcp_bearers.token_hash` (SHA-256), arma los ContextVars `_current_user_id` / `_current_bearer_id` y snapshotea los modelos del lifespan en `_current_whisper_model` / `_current_pyannote_pipeline` / `_current_models_status` para los tools (G12). Las queries por user usan `scoped_session(user_id)` (`db/session.py`), que dispara el listener fail-closed de [ADR-015](ADR/ADR-015.md) con la defensa en capas de [ADR-016](ADR/ADR-016.md). | Bearer tokens en Postgres | Postgres, pipeline, caché |
 | Normalizador de Audio | ffmpeg + SHA-256 | Tempfiles transitorios | ffmpeg binario |
 | Motor de Transcripción | Whisper large-v3 vía WhisperX | Modelo en VRAM | GPU, modelos en `/data/models/` |
 | Motor de Diarización | pyannote 3.1 | Modelo en VRAM | GPU, HF token |
