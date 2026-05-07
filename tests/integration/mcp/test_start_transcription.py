@@ -393,3 +393,199 @@ async def test_start_transcription_returns_models_not_loaded_when_whisper_errore
     finally:
         reset_ctx()
         reset_models()
+
+
+# ---------------------------------------------------------------------------
+# Task 3.3 — edge cases: consumed / expired / cross-user / requested
+# ---------------------------------------------------------------------------
+async def test_start_transcription_already_consumed_returns_409(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: spec §4 UPLOAD_SESSION_ALREADY_CONSUMED — Given an
+    upload row with ``status='consumed'`` (a previous start_transcription
+    succeeded), When start_transcription runs again with the same
+    upload_id, Then the tool raises ALREADY_CONSUMED (409). orchestrate
+    is NOT invoked (the dispatch happens before the orchestrate call).
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="consumed", status="consumed"
+    )
+    _stage_upload_file(tmp_path, upload.id)
+    orchestrate_mock = AsyncMock(side_effect=AssertionError("must NOT call"))
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        orchestrate_mock,
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        with pytest.raises(McpError) as exc:
+            await start_transcription(upload_id=str(upload.id))
+        assert _is_tool_error(exc.value, "UPLOAD_SESSION_ALREADY_CONSUMED")
+        orchestrate_mock.assert_not_called()
+    finally:
+        reset_ctx()
+        reset_models()
+
+
+async def test_start_transcription_expired_session_returns_not_found(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-10 — Given an upload row whose ``expires_at`` is in
+    the past (cliente abandonó tras request_upload_url o tardó > 10 min),
+    When start_transcription runs, Then UPLOAD_SESSION_NOT_FOUND (404).
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session,
+        email_suffix="expired",
+        # offset negative -> past
+        expires_at_offset_seconds=-3600,
+    )
+    _stage_upload_file(tmp_path, upload.id)
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(side_effect=AssertionError("must NOT call")),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        with pytest.raises(McpError) as exc:
+            await start_transcription(upload_id=str(upload.id))
+        assert _is_tool_error(exc.value, "UPLOAD_SESSION_NOT_FOUND")
+    finally:
+        reset_ctx()
+        reset_models()
+
+
+async def test_start_transcription_status_requested_returns_not_found(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-10 — Given an upload row in ``status='requested'``
+    (the client called request_upload_url but POST /api/upload never
+    landed), When start_transcription runs, Then UPLOAD_SESSION_NOT_FOUND
+    (404). SAME body as expired/unknown — no existence leak about
+    whether the upload is mid-flight.
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, upload = await _seed_user_bearer_upload(
+        session, email_suffix="req", status="requested"
+    )
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(side_effect=AssertionError("must NOT call")),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        with pytest.raises(McpError) as exc:
+            await start_transcription(upload_id=str(upload.id))
+        assert _is_tool_error(exc.value, "UPLOAD_SESSION_NOT_FOUND")
+    finally:
+        reset_ctx()
+        reset_models()
+
+
+async def test_start_transcription_cross_user_returns_not_found(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-2 + ADR-014/015 — User B calls start_transcription
+    with an upload_id owned by User A. The listener fail-closed
+    AND-injects ``user_id = B.id``, so B's SELECT for A's row yields
+    None and the tool surfaces UPLOAD_SESSION_NOT_FOUND. SAME body as
+    truly-unknown id (no existence leak).
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    # Alice's upload.
+    alice, alice_bearer, alice_upload = await _seed_user_bearer_upload(
+        session, email_suffix="alice"
+    )
+    _stage_upload_file(tmp_path, alice_upload.id)
+    # Bob (different user) tries to consume it.
+    bob, bob_bearer, _ = await _seed_user_bearer_upload(
+        session, email_suffix="bob"
+    )
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(side_effect=AssertionError("must NOT call")),
+    )
+
+    reset_ctx = _arm_context(bob.id, bob_bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        with pytest.raises(McpError) as exc:
+            await start_transcription(upload_id=str(alice_upload.id))
+        assert _is_tool_error(exc.value, "UPLOAD_SESSION_NOT_FOUND")
+    finally:
+        reset_ctx()
+        reset_models()
+
+
+async def test_start_transcription_unknown_upload_id_returns_not_found(
+    session, monkeypatch, tmp_path
+):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-10 — Given a UUID that doesn't match any row, When
+    start_transcription runs, Then UPLOAD_SESSION_NOT_FOUND (404).
+    """
+    monkeypatch.setattr(
+        "transcription_api.config.settings.data_dir", tmp_path
+    )
+    from mcp.shared.exceptions import McpError
+
+    from transcription_api.mcp.tools.transcription import start_transcription
+
+    user, bearer, _ = await _seed_user_bearer_upload(
+        session, email_suffix="ghost"
+    )
+    monkeypatch.setattr(
+        "transcription_api.mcp.tools.transcription.orchestrate",
+        AsyncMock(side_effect=AssertionError("must NOT call")),
+    )
+
+    reset_ctx = _arm_context(user.id, bearer.id)
+    reset_models = _arm_models_ready()
+    try:
+        with pytest.raises(McpError) as exc:
+            await start_transcription(upload_id=str(uuid4()))
+        assert _is_tool_error(exc.value, "UPLOAD_SESSION_NOT_FOUND")
+    finally:
+        reset_ctx()
+        reset_models()
