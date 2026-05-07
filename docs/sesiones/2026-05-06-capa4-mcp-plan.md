@@ -1133,16 +1133,16 @@ Contenido:
 
 | AC | Batch.Task | Test file | Commit (post-impl) |
 |---|---|---|---|
-| AC-1 | B2.1, B2.4, B3.1 | tests/integration/mcp/test_request_upload_url.py (9 tests, audio+image) + tests/integration/api/test_upload.py (7 tests, POST happy/auth/size/nonce/expiry/kind) + tests/integration/mcp/test_start_transcription.py | RED `b50f1ba`+`e5df696` / GREEN `75a3f66`+`63ded4f` (B2 done; B3.1 pending start_transcription) |
-| AC-2 | B3.3 | tests/integration/mcp/test_start_transcription.py::test_cache_per_user | |
+| AC-1 | B2.1, B2.4, B3.1 | tests/integration/mcp/test_request_upload_url.py (9 tests) + tests/integration/api/test_upload.py (7 tests) + tests/integration/mcp/test_start_transcription.py (10 tests: 5 happy/lock/timeout/models + 5 edge cases) | RED `b50f1ba`+`e5df696`+`b542db9`+`b1ed27d` / GREEN `75a3f66`+`63ded4f`+`1d1600b` (full chain B2+B3 closed) |
+| AC-2 | B3.3 | tests/integration/mcp/test_start_transcription.py::test_start_transcription_cross_user_returns_not_found (listener fail-closed AND-injects user_id; cross-user upload_id surfaces UPLOAD_SESSION_NOT_FOUND, no existence leak) | RED `b1ed27d` / GREEN `1d1600b` |
 | AC-3 | B4.1 | tests/integration/mcp/test_list.py | |
 | AC-4 | B4.2 | tests/integration/mcp/test_search.py | |
 | AC-5 | B4.3 | tests/integration/mcp/test_get_transcription.py | |
 | AC-6 | B5.1 | tests/integration/mcp/test_resources.py | |
 | AC-7 | B2.4 + B5.1 | tests/integration/mcp/test_resources.py::test_image_resource | |
 | AC-8 | B1.3 + B1.4 | tests/integration/mcp/test_mcp_middleware.py (4 tests cubren no-header / malformed / unknown / revoked) | RED `a7eeb01` / GREEN `78c25dd` |
-| AC-9 | B3.1 | tests/integration/mcp/test_start_transcription.py::test_lock_busy | |
-| AC-10 | B3.3 + B2.4 | tests/integration/api/test_upload.py::test_upload_unknown_nonce_returns_404 + ::test_upload_expired_session_returns_404 (Batch 3.3 cubrirá la rama desde start_transcription) | RED `e5df696` / GREEN `63ded4f` (B2.4 side; B3.3 pending) |
+| AC-9 | B3.1 | tests/integration/mcp/test_start_transcription.py::test_start_transcription_gpu_busy_returns_lock_busy + ::test_start_transcription_pipeline_timeout_returns_typed_error (orchestrate raises GPUBusy / PipelineTimeout -> tool maps to LOCK_BUSY / PIPELINE_TIMEOUT with structured fields) | RED `b542db9` / GREEN `1d1600b` |
+| AC-10 | B3.3 + B2.4 | tests/integration/api/test_upload.py (B2.4 side: unknown_nonce + expired_session) + tests/integration/mcp/test_start_transcription.py (B3.3 side: expired / status='requested' / unknown_id all -> UPLOAD_SESSION_NOT_FOUND) | RED `e5df696`+`b1ed27d` / GREEN `63ded4f`+`1d1600b` |
 | AC-11 | B5.2 | tests/integration/mcp/test_delete.py | |
 | AC-12 | B1.1 | tests/unit/mcp/test_mcp_module_imports.py + tests/integration/mcp/test_mcp_mount.py | RED `a1c906d` / GREEN `3425713` |
 | AC-13 | (verification only) | tests/integration/auth/test_me.py (existing) | |
