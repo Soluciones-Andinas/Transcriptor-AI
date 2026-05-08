@@ -68,3 +68,4 @@ htmlcov/
 # Hugging Face cache
 .cache/
 huggingface/
+uv.lock

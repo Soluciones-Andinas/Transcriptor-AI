@@ -52,7 +52,7 @@ C4Container
         Container(stt, "Motor de Transcripción", "WhisperX + Whisper large-v3 (int8_float16)", "Texto + timestamps por palabra")
         Container(diar, "Motor de Diarización", "pyannote 3.1", "Segmentos por hablante")
         Container(merge, "Ensamblador", "Lógica Python", "Asocia palabras a hablantes")
-        Container(mcp, "MCP Server", "Python mcp SDK + auth middleware", "Tools + Resources OAuth-protected")
+        Container(mcp, "MCP Server", "FastMCP (Streamable HTTP) montado en /mcp + bearer middleware", "Tools + Resources con auth ephemeral bearer")
         ContainerDb(pg, "PostgreSQL 16", "SQL", "users, oauth_tokens, transcriptions, images")
         ContainerDb(cache, "Caché Filesystem", "FS local", "Por audio_hash, TTL 24h")
         ContainerDb(blobs, "Blobs Filesystem", "FS local", "Modelos, uploads temp, image files")
@@ -133,12 +133,12 @@ sequenceDiagram
 |---|---|---|---|
 | UI React + Vite | Onboarding visual: login, mostrar config MCP | Cookie de sesión web | Backend OAuth endpoints |
 | FastAPI App (REST) | Auth flow, uploads binarios, healthcheck, sirve UI estática | Sesiones web, uploads en `/data/uploads/` | Postgres, Microsoft Entra |
-| MCP Server | Tools + Resources, lifecycle de transcripciones | Bearer tokens en Postgres | Postgres, pipeline, caché |
+| MCP Server | Tools + Resources, lifecycle de transcripciones. Montado en `/mcp` con `BearerAuthMiddleware` que valida `Authorization: Bearer <plaintext>` contra `mcp_bearers.token_hash` (SHA-256), arma los ContextVars `_current_user_id` / `_current_bearer_id` y snapshotea los modelos del lifespan en `_current_whisper_model` / `_current_pyannote_pipeline` / `_current_models_status` para los tools (G12). Las queries por user usan `scoped_session(user_id)` (`db/session.py`), que dispara el listener fail-closed de [ADR-015](ADR/ADR-015.md) con la defensa en capas de [ADR-016](ADR/ADR-016.md). | Bearer tokens en Postgres | Postgres, pipeline, caché |
 | Normalizador de Audio | ffmpeg + SHA-256 | Tempfiles transitorios | ffmpeg binario |
 | Motor de Transcripción | Whisper large-v3 vía WhisperX | Modelo en VRAM | GPU, modelos en `/data/models/` |
 | Motor de Diarización | pyannote 3.1 | Modelo en VRAM | GPU, HF token |
 | Ensamblador | Asignar palabras a hablantes | Stateless | WhisperX util |
-| Caché Filesystem | Idempotencia 24h por audio_hash | `/data/cache/<hash>/` | Disco |
+| Caché Filesystem | Idempotencia 24h per-user por `(user_id, audio_hash)` (D-027) | `/data/cache/<user_id>/<audio_hash>/result.json` | Disco |
 | PostgreSQL 16 | Datos persistentes con identidad | `users`, `oauth_tokens`, `transcriptions`, `transcription_history`, `images`, `upload_sessions` | Volumen Docker |
 | Cleanup Job | Purga caché vencido | Stateless | Caché |
 
@@ -148,8 +148,8 @@ sequenceDiagram
 |---|---|---|---|---|
 | API HTTP | FastAPI 0.115 + Uvicorn 0.32 | Estándar Python; async; OpenAPI; compatible con MCP SDK (Simplicidad) | Versión Python con CUDA wheels específica | Pinear 3.10/3.11 en Dockerfile |
 | MCP Server | `mcp` SDK Anthropic + auth middleware custom | Único SDK oficial; transport streamable HTTP integrado | SDK joven, breaking changes posibles | Pinear versión; tests de contrato |
-| STT | WhisperX 3.8.5 + Whisper large-v3 (int8_float16) | Framework con diarización integrada (Simplicidad); calidad probada en español; cuantización requerida por VRAM 8 GB del rig ([ADR-001](ADR/ADR-001.md)) | Mejora marginal vs Canary; ~+0,5pp WER por cuantización | Validación empírica Capa 4 |
-| Diarización | pyannote 3.1 | Multilingüe maduro; integra WhisperX ([ADR-002](ADR/ADR-002.md)) | Requiere HF token | Aceptar términos en Fase 0 |
+| STT | WhisperX 3.8.5 + Whisper large-v3 (int8_float16) | Framework con diarización integrada (Simplicidad); calidad probada en español; cuantización requerida por VRAM 8 GB del rig ([ADR-001](ADR/ADR-001.md)) | Mejora marginal vs Canary; ~+0,5pp WER por cuantización | Validación empírica Capa 4. Loader lazy via indirección `_whisperx_load_model(...)` (D-030) — el módulo `pipeline.stt` es importable sin extras `[pipeline]` instalados; sólo invocar el loader requiere la lib pesada (testability + dev box CPU-only). |
+| Diarización | pyannote 3.1 | Multilingüe maduro; integra WhisperX ([ADR-002](ADR/ADR-002.md)) | Requiere HF token | Aceptar términos en Fase 0 (TRES modelos gated, ver [RF-TRX](RF/RF-TRX.md) §Prerrequisitos HF). Loader lazy via indirección `_pyannote_from_pretrained(...)` (D-028 + D-030) por el mismo motivo que STT. |
 | Audio | ffmpeg 6.x | Universal, todos los codecs (Simplicidad) | Codec raro falla | `-err_detect ignore_err` + tests con MP4 reales |
 | Caché efímero (24h) | Filesystem local | Sin dependencias; debug trivial ([ADR-004](ADR/ADR-004.md)) | TTL manual | Cleanup job |
 | Persistencia (users, history, tokens) | PostgreSQL 16 | Transacciones, queries SQL, JSONB ([ADR-008](ADR/ADR-008.md)) | Otro container | Healthcheck + volumen persistente |
@@ -177,6 +177,7 @@ sequenceDiagram
 | [ADR-013](ADR/ADR-013.md) | Upload de blobs vía endpoints HTTP autenticados | Aceptada | 2026-04-30 | §3, §4 — define `/api/upload`, `/api/upload-image` |
 | [ADR-014](ADR/ADR-014.md) | Per-user scoping enforcement vía SQLAlchemy event listener | Reemplazada por ADR-015 | 2026-05-04 | §3 — versión fail-open original |
 | [ADR-015](ADR/ADR-015.md) | Listener de scoping fail-closed + `bypass_scoping` context manager | Aceptada | 2026-05-05 | §3, §8 — query sin `user_id` armado raise `ScopingNotArmedError`; bypass explícito vía context manager |
+| [ADR-016](ADR/ADR-016.md) | Defensa en capas para per-user scoping (startup classification + listener) | Aceptada | 2026-05-07 | §8 — startup guard complementa listener fail-closed; modelo nuevo sin `user_id` rompe boot en lugar de leak silencioso |
 
 ## 8. Seguridad, Observabilidad y Resiliencia
 

@@ -14,10 +14,47 @@ the same helper `/health` uses, so test environment matches runtime exactly.
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Generator
 
 import pytest
 import pytest_asyncio
+
+
+# ---------------------------------------------------------------------------
+# Cross-event-loop hygiene for module-level asyncio primitives
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _reset_orchestrator_lock_per_test():
+    """Reset the orchestrator's module-level ``asyncio.Lock`` before each test.
+
+    ``pipeline.orchestrator._orchestrator_lock`` wraps an ``asyncio.Lock``
+    that binds to the running event loop on first acquire. pytest-asyncio
+    creates a fresh loop per function-scoped test, so the lock from test
+    1's loop becomes unusable in test 2 with
+    ``RuntimeError: <Lock locked> is bound to a different event loop``.
+
+    The autouse fixture rebinds the inner ``asyncio.Lock`` per-test,
+    preserving the outer ``_OrchestrationLock`` object identity (so test
+    imports via ``from ..orchestrator import _orchestrator_lock`` keep
+    working) but resetting the loop affinity. Cheap (~µs); applied to
+    every test for safety, not just pipeline ones — auth callback tests
+    transitively import the orchestrator (via ``api.transcriptions``)
+    and hit the same trap if a prior pipeline test contaminated the lock.
+
+    Robust to import order: if the orchestrator module hasn't loaded yet
+    (rare; some pure-unit tests), the fixture no-ops.
+    """
+    try:
+        from transcription_api.pipeline import orchestrator
+    except ImportError:
+        yield
+        return
+
+    lock_obj = orchestrator._orchestrator_lock
+    lock_obj._lock = asyncio.Lock()
+    lock_obj._owner_task = None
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -139,21 +176,102 @@ def migrated_db_url(pg_container: str) -> str:
     return pg_container
 
 
-@pytest_asyncio.fixture
-async def engine(migrated_db_url: str):
-    """Per-test AsyncEngine pointed at the migrated testcontainer DB."""
-    from sqlalchemy.ext.asyncio import create_async_engine
+@pytest_asyncio.fixture(autouse=True)
+async def engine(migrated_db_url: str, request):
+    """Per-test AsyncEngine pointed at the migrated testcontainer DB.
 
-    eng = create_async_engine(migrated_db_url, future=True)
+    Also overrides ``transcription_api.db.session.engine`` and
+    ``async_session_factory`` so production code paths invoked directly
+    by tests (e.g. MCP tools that use ``scoped_session(user_id)``) hit
+    the testcontainer DB instead of the default ``POSTGRES_HOST=postgres``
+    which does not resolve on CI runners. Latent since Capa 2: tests
+    that invoke tools directly (no FastAPI client wrapper) used the
+    production module's engine, which only happened to work when the
+    dev box had ``POSTGRES_HOST`` pointing at the same testcontainer
+    via docker-compose. CI without that wiring exposed the gap.
+
+    Marker ``no_engine_override`` opts a test out of the patch — for
+    AC-7 contract tests that verify the production module-level engine
+    is constructed from ``settings`` directly. Under the override, the
+    engine's ``url.username`` would point at the testcontainer
+    (``test``) instead of ``settings.postgres_user`` (``transcription``),
+    making AC-7 unverifiable.
+    """
+    if request.node.get_closest_marker("no_engine_override"):
+        # AC-7 contract path: don't touch the production module. The
+        # test reads ``transcription_api.db.engine`` directly and
+        # asserts on URL/pool config — no DB connection is opened, so
+        # POSTGRES_HOST not resolving is fine here.
+        yield None
+        return
+
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+
+    from transcription_api.config import settings
+
+    # Mirror ``db.session._make_engine`` so the patched ``engine`` is
+    # indistinguishable from the production singleton — including
+    # ``pool_size`` / ``max_overflow`` so ``test_engine_from_settings``
+    # (AC-7) stays valid under the override, and ``pool_pre_ping`` so
+    # connection-recycling behavior matches dev/prod (no surprise
+    # divergence on long-running test sessions).
+    eng = create_async_engine(
+        migrated_db_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_pool_max_overflow,
+        pool_pre_ping=True,
+        future=True,
+    )
+    factory = async_sessionmaker(bind=eng, expire_on_commit=False, class_=AsyncSession)
+
+    # Patch production module attributes so `scoped_session` (and any
+    # other call site reading these via name lookup at call time) uses
+    # the testcontainer engine. Snapshot + restore for hermetic teardown.
+    #
+    # `mcp/middleware.py:46` does `from ..db.session import async_session_factory`,
+    # which captures the reference at IMPORT time. Patching only
+    # `db.session.async_session_factory` doesn't update that captured name
+    # in middleware. We also patch the name in mcp.middleware so the bearer
+    # validation lookup hits the testcontainer DB instead of resolving the
+    # default `postgres` host (gaierror on CI runners).
+    import transcription_api.db as _db_pkg
+    import transcription_api.db.session as _session_mod
+    import transcription_api.mcp.middleware as _mw_mod
+
+    # `db/__init__.py:20` does `from .session import engine, async_session_factory`,
+    # so the package re-export (`_db_pkg.engine`) is a snapshot captured
+    # at IMPORT time. Patching only `db.session.engine` doesn't update
+    # `db.engine` — and `main.py` lifespan reads `_db.engine` via the
+    # package re-export. Same shape applies to mcp.middleware which
+    # imports `async_session_factory` directly. Patch all three sites.
+    _orig_engine_session = _session_mod.engine
+    _orig_engine_pkg = _db_pkg.engine
+    _orig_session_factory = _session_mod.async_session_factory
+    _orig_pkg_factory = _db_pkg.async_session_factory
+    _orig_mw_factory = _mw_mod.async_session_factory
+    _session_mod.engine = eng
+    _db_pkg.engine = eng
+    _session_mod.async_session_factory = factory
+    _db_pkg.async_session_factory = factory
+    _mw_mod.async_session_factory = factory
     try:
         yield eng
     finally:
+        _session_mod.engine = _orig_engine_session
+        _db_pkg.engine = _orig_engine_pkg
+        _session_mod.async_session_factory = _orig_session_factory
+        _db_pkg.async_session_factory = _orig_pkg_factory
+        _mw_mod.async_session_factory = _orig_mw_factory
         await eng.dispose()
 
 
 @pytest_asyncio.fixture
 async def session(engine) -> AsyncGenerator:
-    """Per-test AsyncSession with auto-rollback to keep tests isolated.
+    """Per-test AsyncSession with auto-rollback + post-test TRUNCATE.
 
     The fixture session is the test driver's lane (factories, verification
     queries) — NOT the lane the FastAPI request handlers use. We arm
@@ -162,11 +280,33 @@ async def session(engine) -> AsyncGenerator:
     behavior is exercised through the FastAPI client + `get_session()`
     dependency, which produces a separate session armed with `user_id`
     by the auth middleware.
+
+    **TRUNCATE on teardown** (Capa 4 CI G14 fix): rollback alone keeps
+    the test driver lane clean, but production code paths exercised by
+    integration tests (notably ``auth/routes.py::callback`` upsert under
+    ``bypass_scoping``) commit through the FastAPI dependency session.
+    Those commits survive the test-driver rollback. Without the
+    TRUNCATE, the next test (or the next parametrize value) hits
+    ``UniqueViolationError`` on hardcoded emails like
+    ``alice@sandinas.test``. TRUNCATE CASCADE wipes every per-user
+    table after each test, restoring isolation. Cost: ~5ms per test
+    against an empty schema.
     """
+    from sqlalchemy import text
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
     async with factory() as s:
         s.info["scoping_bypass"] = True
-        yield s
-        await s.rollback()
+        try:
+            yield s
+        finally:
+            await s.rollback()
+
+    # Wipe any rows committed via production code paths during the test.
+    # CASCADE handles dependent tables; explicit list keeps intent clear.
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "TRUNCATE users, oauth_tokens, mcp_bearers, transcriptions, "
+            "images, upload_sessions RESTART IDENTITY CASCADE"
+        ))

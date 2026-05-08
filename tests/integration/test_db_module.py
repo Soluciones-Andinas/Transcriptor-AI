@@ -76,6 +76,7 @@ def test_models_metadata(model_name, expected_tablename, fk_columns):
 # ---------------------------------------------------------------------------
 # AC-7 — engine + session factory derived from settings
 # ---------------------------------------------------------------------------
+@pytest.mark.no_engine_override
 def test_engine_from_settings():
     """
     Spec: SPEC-capa1-postgres-orm-v1

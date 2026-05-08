@@ -39,6 +39,12 @@ dependencies = [
     "cryptography>=42.0",  # AES-256-GCM for oauth_tokens.ms_*_encrypted (RF-AUTH-02)
     "itsdangerous>=2.2.0",  # signed cookie state for OAuth PKCE flow (RF-AUTH-01)
     "httpx>=0.27.0",  # OAuth /token + JWKS fetch (oauth_client.exchange_code, fetch_jwks)
+
+    # MCP server / Capa 4 — wiki/RF/RF-MCP.md, wiki/ADR/ADR-013
+    # Anthropic official Python SDK. Lightweight: no GPU/ML deps, just
+    # the JSON-RPC + Streamable-HTTP transport machinery so the FastAPI
+    # app can mount the MCP sub-app at /mcp.
+    "mcp[server]>=1.5,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -105,5 +111,7 @@ markers = [
     "requires_docker: test needs a running Docker daemon (testcontainers).",
     "requires_gpu: test needs a CUDA or MPS accelerator (skip otherwise).",
     "requires_ffmpeg: test needs the ffmpeg/ffprobe binaries on PATH (Capa 3 pipeline).",
+    "requires_docker_gpu: test needs both Docker and a GPU (rig-only).",
+    "no_engine_override: opt out of tests/conftest.py engine override (AC-7 contract tests).",
     "e2e: end-to-end smoke against `docker compose up` (slow, opt-in).",
 ]

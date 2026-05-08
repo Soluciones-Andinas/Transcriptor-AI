@@ -62,14 +62,14 @@ sequenceDiagram
     MCP->>MCP: adquiere lock global (RF-TRX-04)
     MCP->>N: ffmpeg /data/uploads/<upload_id>/original.bin -> /data/uploads/<upload_id>/audio.wav
     N-->>MCP: WAV + audio_hash (sha256)
-    MCP->>FS: lookup <DATA_DIR>/cache/<audio_hash>/meta.json
+    MCP->>FS: lookup <DATA_DIR>/cache/<user_id>/<audio_hash>/meta.json
     FS-->>MCP: NOT FOUND (cache miss)
     MCP->>T: transcribir(audio.wav, language='es')
     T-->>MCP: segments + words con timestamps
     MCP->>D: diarizar(audio.wav, max_speakers=4, min_speakers=1)
     D-->>MCP: speaker segments
     MCP->>MCP: merge transcript + speakers
-    MCP->>FS: persist <DATA_DIR>/cache/<audio_hash>/transcription.json + meta.json
+    MCP->>FS: persist <DATA_DIR>/cache/<user_id>/<audio_hash>/transcription.json + meta.json
     MCP->>PG: INSERT transcriptions (user_id, audio_hash, original_filename, ...)
     MCP->>PG: UPDATE upload_sessions SET status='consumed', consumed_at=now()
     MCP->>MCP: borra /data/uploads/<upload_id>/ en finally

@@ -296,3 +296,48 @@ Default to Spanish, technical, direct, concise. Justify recommendations with dat
 ### When to offer scheduling background work
 
 After completing a change that has a natural future follow-up (a feature flag to clean up later, a soak window to verify, a graph that should be re-built after wiki changes settle), offer a one-line `/schedule` proposal at the end of the reply. Do not pile up offers across consecutive turns. Do not offer for refactors, bugfixes, or documentation tasks.
+
+---
+
+## 12. Testing Conventions
+
+Mirror of `AGENTS.md` §12. Both files must stay in sync per §0 governance rule.
+
+### Pytest markers
+
+Four custom markers gate tests by environment dependency. Resolution lives in `tests/conftest.py::pytest_collection_modifyitems`; each auto-skips when its prerequisite is missing.
+
+| Marker | Skip trigger | Used for |
+|---|---|---|
+| `requires_docker` | `docker info` does not respond within ~5s | testcontainers Postgres (most Capa 1/2/3/4 integration tests) |
+| `requires_gpu` | `transcription_api.gpu.detect_accelerator()` reports no CUDA / MPS | Real WhisperX / pyannote model loaders |
+| `requires_docker_gpu` | Either Docker or GPU is missing | Hybrid pipeline tests (rig-only) |
+| `requires_ffmpeg` | `ffmpeg` or `ffprobe` not on PATH | Audio normalization tests |
+
+`e2e` is reserved for full-pipeline tests; deselect it in fast iterations.
+
+### Local invocation
+
+Default fast loop:
+
+```
+.venv/bin/python -m pytest tests/ -q -m "not e2e and not requires_docker_gpu and not requires_ffmpeg"
+```
+
+Lint gate:
+
+```
+.venv/bin/python -m ruff check src/ tests/
+```
+
+### CI workflow
+
+`.github/workflows/test.yml` (G14 review-fix) runs on every PR + push to `master`. Ubuntu-latest + Python 3.11 + ffmpeg + `pip install -e ".[dev]"`. The workflow runs `requires_docker` tests because the runner has Docker; testcontainers spins Postgres on demand. Heavy `[pipeline]` extras stay out (Capa 3 mocks at the loader seam per D-030).
+
+A green local run is necessary but not sufficient — ~200 `requires_docker` tests skip on the dev box and only run on CI. Wait for the GitHub Actions check before merging.
+
+### Test layout reminder
+
+Integration helpers (assert_tool_error fixture, arm_context, seed_user_with_bearer) live in `tests/integration/conftest.py` (G11.7). Existing test files still ship local copies of these helpers — they migrate when touched naturally; new tests should use the conftest version.
+
+When adding a test that does not need DB, place it in `tests/unit/` to avoid the `requires_docker` module marker. Splitting a check into "static / unit" + "runtime / integration" beats fighting the module-level marker (lesson from D-048).

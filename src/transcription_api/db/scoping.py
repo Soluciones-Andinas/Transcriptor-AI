@@ -65,6 +65,37 @@ class ScopingNotArmedError(RuntimeError):
     legitimate cross-user operation in `bypass_scoping(session)`.
     """
 
+
+class ScopingClassificationError(RuntimeError):
+    """Startup-time guard: a model is neither per-user nor allowlisted.
+
+    Raised by `_validate_model_classification()` (invoked from
+    `enable_per_user_scoping()`) when an ORM mapper in `Base.registry`
+    has no `user_id` column AND its class name is not in
+    `_NON_SCOPED_MODELS`. The service refuses to start.
+
+    Action: either denormalize `user_id` into the offending model's row
+    (if it should be per-user — listener then enrolls it automatically)
+    or add the class name to `_NON_SCOPED_MODELS` below (deliberate
+    global model — must be reviewed for Privacy implications).
+    """
+
+
+# Class names of ORM models that are NOT per-user by design. The
+# listener does not enforce `WHERE user_id = X` against these — they
+# are global to the service.
+#
+# Adding a model here is a deliberate Privacy decision. Today the only
+# entry is `User`: it IS the user identity (its primary key IS the
+# user_id) so a self-scope filter would be a redundant tautology and
+# would break login lookups (where user_id is not yet known).
+#
+# Any future global entity (system Config, AuditLog, FeatureFlag) must
+# be reviewed before being added: confirm it carries no per-user data
+# and that exposing all its rows to every user is intentional.
+_NON_SCOPED_MODELS: frozenset[str] = frozenset({"User"})
+
+
 _SCOPED_MODELS_CACHE: set[type] | None = None
 
 
@@ -91,8 +122,23 @@ def _scoping_bypass(state: ORMExecuteState) -> bool:
 
 
 def _resolve_user_id(state: ORMExecuteState) -> uuid.UUID | None:
+    """Read ``session.info["user_id"]`` with a type guard.
+
+    G8 review-fix: a string or other non-UUID value silently slipping
+    into ``info["user_id"]`` would still satisfy ``is not None`` and
+    pass through the listener as a bind parameter, making cross-user
+    queries non-deterministic. The isinstance check raises
+    ``ScopingNotArmedError`` instead, surfacing the misconfiguration
+    at the call site that armed the wrong type.
+    """
     info = state.session.info if state.session is not None else {}
-    return info.get("user_id")
+    user_id = info.get("user_id")
+    if user_id is not None and not isinstance(user_id, uuid.UUID):
+        raise ScopingNotArmedError(
+            f"session.info['user_id'] is {type(user_id).__name__!r}, "
+            "expected uuid.UUID"
+        )
+    return user_id
 
 
 def _on_orm_execute(state: ORMExecuteState) -> None:
@@ -128,14 +174,67 @@ def _on_orm_execute(state: ORMExecuteState) -> None:
     state.statement = state.statement.where(cls.user_id == user_id)
 
 
+def _validate_model_classification(mappers: Any = None) -> None:
+    """Assert every ORM model is explicitly classified per-user or non-scoped.
+
+    For each mapper, exactly one of:
+    - It carries a `user_id` column (per-user — listener enrolls it via
+      `_scoped_models()` and AND-injects `WHERE user_id = X`).
+    - Its class name is in `_NON_SCOPED_MODELS` (deliberate global model).
+
+    Models that match neither raise `ScopingClassificationError` listing
+    every offender, so a single fix-pass closes them all.
+
+    This guard exists because `_scoped_models()` infers per-user status
+    from the presence of a literal `user_id` column. A future model that
+    SHOULD be per-user but lacks that column (typo, bad denorm, copy from
+    a global table) silently falls through both code paths: not enrolled
+    in the listener, not blocked by anything else. Fail-OPEN at the
+    listener level. This validation closes that gap by requiring every
+    model to be explicitly classified.
+
+    Default `mappers=None` reads `Base.registry.mappers` after importing
+    `db.models` (so all mappers are registered); pass an explicit iterable
+    in tests to drive the function with mock mappers.
+    """
+    if mappers is None:
+        from . import models  # noqa: F401 — register on Base.metadata
+        mappers = Base.registry.mappers
+
+    unclassified: list[str] = []
+    for mapper in mappers:
+        cls = mapper.class_
+        has_user_id = "user_id" in mapper.columns.keys()
+        in_allowlist = cls.__name__ in _NON_SCOPED_MODELS
+        if not has_user_id and not in_allowlist:
+            unclassified.append(cls.__name__)
+
+    if unclassified:
+        raise ScopingClassificationError(
+            f"Model(s) lack 'user_id' column and are not in _NON_SCOPED_MODELS: "
+            f"{sorted(unclassified)}. Either denormalize user_id into the row "
+            f"(per-user model — listener will enroll it automatically) or add "
+            f"the class name to _NON_SCOPED_MODELS in db/scoping.py "
+            f"(deliberate global model — review for Privacy implications)."
+        )
+
+
 _LISTENER_INSTALLED = False
 
 
 def enable_per_user_scoping() -> None:
-    """Idempotently install the global per-user scoping listener."""
+    """Idempotently install the global per-user scoping listener.
+
+    Validates model classification first (raises before installing the
+    listener if any model is neither per-user nor allowlisted). The
+    service refuses to start when a misclassified model is present.
+    """
     global _LISTENER_INSTALLED
     if _LISTENER_INSTALLED:
         return
+
+    _validate_model_classification()
+
     from sqlalchemy.orm import Session
 
     event.listen(Session, "do_orm_execute", _on_orm_execute)

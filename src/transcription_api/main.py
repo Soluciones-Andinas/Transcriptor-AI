@@ -58,15 +58,19 @@ async def lifespan(app: FastAPI):
     # to start so the operator catches the misconfiguration immediately.
     _enforce_single_worker_or_warn()
 
-    # DATA_DIR/{models,cache,uploads} (RF-CACHE-01 step 2 + H-4 startup).
+    # DATA_DIR/{models,cache,uploads,blobs} (RF-CACHE-01 step 2 + H-4 startup +
+    # G1 review-fix: blobs_dir is the persistent image store written by
+    # POST /api/upload-image — a missing dir would 500 the first upload).
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     settings.cache_dir.mkdir(parents=True, exist_ok=True)
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+    settings.blobs_dir.mkdir(parents=True, exist_ok=True)
     logger.info(
-        "data_dirs_ready models_dir=%s cache_dir=%s uploads_dir=%s",
+        "data_dirs_ready models_dir=%s cache_dir=%s uploads_dir=%s blobs_dir=%s",
         settings.models_dir,
         settings.cache_dir,
         settings.uploads_dir,
+        settings.blobs_dir,
     )
 
     # H-4: purge orphan uploads from a previous crashed run. A fresh
@@ -397,9 +401,25 @@ app.include_router(auth_router)
 # Capa 3 — wire the transcriptions API (POST + GET /api/transcriptions).
 # The router uses Depends(get_current_user_mcp) for bearer auth and
 # Depends(get_session) for the request-scoped DB session.
-from .api import transcriptions_router  # noqa: E402
+from .api import transcriptions_router, upload_router  # noqa: E402
 
 app.include_router(transcriptions_router)
+
+# Capa 4 — chunked upload endpoint paired with the MCP tool
+# request_upload_url. Auth is bearer-vs-hash (ephemeral bearer issued
+# by the tool) — NOT the Capa 2 MCP bearer middleware, so this router
+# attaches at the FastAPI level and validates inline.
+app.include_router(upload_router)
+
+
+# Capa 4 — mount the MCP server as an ASGI sub-app at /mcp. The
+# Streamable-HTTP transport (ADR-013) lives entirely under that prefix;
+# tools and resources are registered against ``mcp_server`` in
+# ``transcription_api.mcp`` submodules at import time, BEFORE the ASGI
+# app is built (see ``mcp/__init__.py``).
+from .mcp import mcp_app  # noqa: E402
+
+app.mount("/mcp", mcp_app)
 
 
 # ---------------------------------------------------------------------------

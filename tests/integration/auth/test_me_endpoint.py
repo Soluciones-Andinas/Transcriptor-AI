@@ -103,6 +103,29 @@ async def test_me_without_flash_returns_id_only(client, session):
 
 
 # ---------------------------------------------------------------------------
+# AC-13 (Capa 4) — /auth/me.mcp_url consistent with settings.public_base_url
+# ---------------------------------------------------------------------------
+async def test_me_returns_mcp_url_consistent_with_settings(client, session):
+    """
+    Spec: SPEC-capa4-mcp-v1
+    Criterion: AC-13 (G11 review-fix) — the ``mcp_url`` field surfaced
+    by ``GET /auth/me`` MUST be derived from ``settings.public_base_url``
+    so a redeploy with a different host (Docker compose vs local) does
+    not silently leave the stale value in the response. Pins the
+    contract that ``mcp_url == f"{settings.public_base_url}/mcp"``.
+    """
+    from transcription_api.config import settings
+
+    _, _, session_token = await _login_as(session, email="mcp-url@sandinas.test")
+    r = await client.get("/auth/me", cookies={"session": session_token})
+
+    assert r.status_code == 200
+    body = r.json()
+    expected = f"{settings.public_base_url.rstrip('/')}/mcp"
+    assert body.get("mcp_url") == expected, body
+
+
+# ---------------------------------------------------------------------------
 # AC-15 / T15 — /auth/me unauthenticated
 # ---------------------------------------------------------------------------
 async def test_me_unauthenticated_returns_401(client, session):

@@ -24,6 +24,31 @@ class Settings(BaseSettings):
     compute_type: str = Field(default="int8_float16", alias="COMPUTE_TYPE")
     max_upload_mb: int = Field(default=500, alias="MAX_UPLOAD_MB", gt=0)
     max_image_upload_mb: int = Field(default=25, alias="MAX_IMAGE_UPLOAD_MB", gt=0)
+    # Postgres ``regconfig`` name for full-text search. ``spanish`` is built
+    # into PG core; the GIN functional index in the Capa 1 migration is
+    # created on the same regconfig and only matches if the query side
+    # casts identically (``::regconfig``). Kept configurable so future
+    # multilingual deployments can override without code changes.
+    fts_config: str = Field(default="spanish", alias="FTS_CONFIG")
+    # Grace window (seconds) past ``upload_sessions.expires_at`` before
+    # POST /api/upload(-image) and start_transcription mark the session
+    # as expired. RF-MCP-02 step 6 — absorbs clock skew between the tool
+    # issuing the URL and the REST endpoint receiving the bytes.
+    upload_session_grace_seconds: int = Field(
+        default=30, alias="UPLOAD_SESSION_GRACE_SECONDS", ge=0
+    )
+    # G10.3 — chunk size for streaming uploads (64 KiB), the +5% margin
+    # the audio handler applies before declaring FILE_TOO_LARGE, and the
+    # filename of the persisted raw blob under uploads/<id>/.
+    upload_chunk_bytes: int = Field(
+        default=65536, alias="UPLOAD_CHUNK_BYTES", gt=0
+    )
+    upload_size_margin: float = Field(
+        default=1.05, alias="UPLOAD_SIZE_MARGIN", gt=1.0
+    )
+    upload_raw_filename: str = Field(
+        default="original.bin", alias="UPLOAD_RAW_FILENAME"
+    )
     pipeline_timeout_seconds: int = Field(
         default=1800, alias="PIPELINE_TIMEOUT_SECONDS", gt=0
     )
@@ -129,6 +154,12 @@ class Settings(BaseSettings):
     )
     upload_session_grace_seconds: int = Field(
         default=300, alias="UPLOAD_SESSION_GRACE_SECONDS", ge=0
+    )
+    # Capa 4 — TTL del upload session ephemeral (RF-MCP-01 step 6:
+    # `request_upload_url` setea `expires_at = now() + this`). Default 10 min,
+    # override per-deploy via UPLOAD_SESSION_TTL_SECONDS.
+    upload_session_ttl_seconds: int = Field(
+        default=600, alias="UPLOAD_SESSION_TTL_SECONDS", gt=0
     )
 
     # --- Concurrencia (ADR-005) --------------------------------------------

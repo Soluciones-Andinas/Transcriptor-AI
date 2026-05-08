@@ -17,10 +17,11 @@ La persistencia se divide en **dos capas** según [ADR-008](ADR/ADR-008.md):
 │   ├── whisperx/large-v3/
 │   ├── whisperx/alignment/wav2vec2-es/
 │   └── pyannote/speaker-diarization-3.1/
-├── cache/                                 # Caché efímero 24h (RF-TRX-02)
-│   ├── 8f3a7e2c1b...0d (sha256, 64 chars)/
-│   │   ├── transcription.json
-│   │   └── meta.json
+├── cache/                                 # Caché efímero per-user 24h (RF-TRX-02, D-027)
+│   ├── <user_id>/                         # Aislamiento por usuario (Privacy > Performance)
+│   │   ├── 8f3a7e2c1b...0d (sha256, 64 chars)/
+│   │   │   └── result.json                # TranscriptionResult completo; TTL = file mtime
+│   │   └── ...
 │   └── ...
 ├── uploads/                               # Uploads temporales pre-pipeline
 │   ├── <upload_id>/                       # Borrado tras start_transcription
@@ -130,7 +131,8 @@ Sesiones efímeras de upload binario. Vinculan el `request_upload_url` (tool MCP
 | `id` | `UUID` | PK | También sirve como `upload_id` |
 | `user_id` | `UUID` | FK `users(id)` ON DELETE CASCADE | |
 | `bearer_id` | `UUID` | FK `mcp_bearers(id)` | Bearer del MCP que lo originó |
-| `nonce` | `TEXT` | NOT NULL UNIQUE | Token único para la URL firmada |
+| `nonce` | `TEXT` | NOT NULL UNIQUE | Token único para la URL firmada (viaja en query string) |
+| `upload_bearer_hash` | `TEXT` | NOT NULL | `SHA-256(plaintext)` hex del bearer efímero generado por `request_upload_url` (RF-MCP-01 step 3); `POST /api/upload` valida `Authorization: Bearer <plaintext>` contra este hash (RF-MCP-03 step 4). Plaintext se entrega una sola vez al cliente MCP, nunca se persiste. |
 | `kind` | `TEXT` | NOT NULL | `audio` o `image` |
 | `transcription_id` | `UUID` | NULL | Para `image`: a qué transcript se asocia |
 | `expected_size_bytes` | `BIGINT` | NOT NULL | Hint del cliente |
@@ -381,6 +383,8 @@ Usados en respuestas HTTP/MCP de error y en el campo `error_code` de logs `*_fai
 | `LOCK_BUSY` | 503 | Lock global ocupado |
 | `CUDA_OOM` | 500 | GPU sin memoria |
 | `MODEL_FAILURE` | 500 | Crash no clasificado del modelo |
+| `MODELS_NOT_LOADED` | 503 | Whisper o pyannote no están en estado `ready` (lifespan startup pendiente o falló). Surface por RF-MCP-02 / RF-TRX. |
+| `PIPELINE_TIMEOUT` | 504 | Pipeline excedió `pipeline_timeout_seconds`. Surface por RF-MCP-02 / RF-TRX. |
 
 ### Recursos
 

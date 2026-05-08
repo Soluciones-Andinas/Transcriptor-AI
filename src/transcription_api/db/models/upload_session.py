@@ -35,6 +35,12 @@ class UploadSession(Base):
         nullable=False,
     )
     nonce: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # Capa 4 D-044 — SHA-256(plaintext) hex of the ephemeral bearer emitted
+    # by ``request_upload_url`` (RF-MCP-01 step 3). ``POST /api/upload``
+    # validates the incoming ``Authorization: Bearer <plaintext>`` against
+    # this stored hash with ``hmac.compare_digest`` (RF-MCP-03 step 4).
+    # Plaintext is shown to the client once and never persisted.
+    upload_bearer_hash: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'audio' | 'image'
     transcription_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),

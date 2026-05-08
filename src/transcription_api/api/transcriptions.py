@@ -126,39 +126,34 @@ def _stripped_500(
 def _models_loaded_or_503(request: Request) -> JSONResponse | None:
     """AC-15 short-circuit: 503 MODELS_NOT_LOADED if either model is not ready.
 
-    Reads ``app.state.{whisper,pyannote}_status`` (set by the lifespan
-    after model load attempts). On error, surfaces ``app.state.*_detail``
-    in the response body so the operator/client knows which HF condition
-    or CUDA failure triggered the degraded state. Returns ``None`` when
-    both models are ``"ready"`` so the caller can proceed.
+    Thin REST adapter over ``runtime.readiness.check_models_ready`` —
+    the precedence and detail-field semantics live there so the MCP
+    tool ``start_transcription`` and this REST endpoint stay in lock
+    step (G2 dedupe).
     """
-    state = request.app.state
-    whisper = getattr(state, "whisper_status", "loading")
-    pyannote = getattr(state, "pyannote_status", "loading")
-    if whisper == "ready" and pyannote == "ready":
-        return None
+    from ..runtime.readiness import check_models_ready
 
-    if whisper != "ready":
-        which = "whisper"
-        detail = getattr(state, "whisper_detail", None)
-    else:
-        which = "pyannote"
-        detail = getattr(state, "pyannote_detail", None)
+    res = check_models_ready(request.app.state)
+    if res.ready:
+        return None
 
     return JSONResponse(
         status_code=503,
         content={
             "detail": {
                 "error_code": "MODELS_NOT_LOADED",
-                "reason": f"{which} model is not ready; service is starting or degraded",
-                "detail": detail,
+                "reason": (
+                    f"{res.failing_model} model is not ready; "
+                    "service is starting or degraded"
+                ),
+                "detail": res.detail,
             }
         },
         headers={"Retry-After": "30"},
     )
 
 
-@router.post("/transcriptions")
+@router.post("/transcriptions", deprecated=True)
 async def post_transcription(
     request: Request,
     file: UploadFile = File(...),
@@ -169,7 +164,22 @@ async def post_transcription(
     user: User = Depends(get_current_user_mcp),
     db: AsyncSession = Depends(get_session),
 ) -> JSONResponse:
-    """POST /api/transcriptions — multipart upload + bearer + orchestrate."""
+    """POST /api/transcriptions — multipart upload + bearer + orchestrate.
+
+    Capa 4 AC-16 / D-026: this endpoint is marked ``deprecated=True`` in
+    OpenAPI and emits a WARN ``legacy_endpoint_invoked`` on every
+    invocation. It still works (rig smoke-test depends on it); removal
+    is scheduled for Capa 5. The MCP flow ``request_upload_url`` ->
+    ``POST /api/upload`` -> ``start_transcription`` is the replacement.
+    """
+
+    # AC-16 — emit one WARN per invocation BEFORE any other branch so
+    # 503 / 401 / 413 paths still increment the legacy-usage counter.
+    logger.warning(
+        "legacy_endpoint_invoked "
+        "deprecated_endpoint=POST_/api/transcriptions "
+        "removal_target=Capa5"
+    )
 
     # AC-15 — short-circuit BEFORE accepting the upload if either model
     # failed to load. Saves the network round-trip on a degraded service.

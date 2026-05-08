@@ -14,7 +14,9 @@ expected workload (~5 transcripciones/day) this is highly unlikely.
 """
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -43,6 +45,37 @@ async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
     expire_on_commit=False,
     class_=AsyncSession,
 )
+
+
+@asynccontextmanager
+async def scoped_session(user_id: UUID) -> AsyncIterator[AsyncSession]:
+    """Yield an ``AsyncSession`` with ``info["user_id"]`` armed for ADR-014/015.
+
+    G9 review-fix: this ctx mgr lived in ``mcp/session.py`` (named
+    ``mcp_request_session``) but the same shape is reused by every
+    listener-armed call site (REST endpoints in future tiers will need
+    the same primitive). Living next to ``async_session_factory`` keeps
+    the DB-level seam in one place.
+
+    Commit on the happy path so the handler's writes land before the
+    response leaves the wire. Rollback on any exception.
+    """
+    session: AsyncSession = async_session_factory()
+    session.info["user_id"] = user_id
+    try:
+        yield session
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        # Defense-in-depth disarm — the factory returns a fresh session
+        # per call today (so no leak is possible), but a future refactor
+        # that pools sessions would otherwise inherit the prior caller's
+        # user_id. Mirrors CR-4 from Capa 2's ``get_session`` teardown.
+        session.info.pop("user_id", None)
+        session.info.pop("scoping_bypass", None)
+        await session.close()
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

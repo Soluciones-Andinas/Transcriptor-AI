@@ -50,6 +50,8 @@ Este RF NO describe un endpoint o tool concreto: define los invariantes que TODO
 - **Garantía**: una tool / resource handler NO puede leakear datos de otros users aunque omita el `WHERE user_id = X` explícito en la query. Si la dependency de auth se omite por error, la query raise `ScopingNotArmedError` (no leak silencioso).
 - **Bypass intencional**: solo para auth lookups y mantenimiento administrativo, vía `with bypass_scoping(session): ...`. Nunca dentro de un tool/resource handler de Capa 6.
 
+> **Implementation note (Capa 4 G13)**: tool/resource handlers que operan sobre per-user models emiten queries ORM **sin** predicate `user_id` explícito. El listener ([ADR-015](../ADR/ADR-015.md)) AND-injecta `WHERE user_id = X` desde `db.info["user_id"]` armado por el bearer middleware en `scoped_session(user_id)` (`db/session.py`). [ADR-016](../ADR/ADR-016.md) agrega un startup classification guard que rehúsa arrancar el servicio si un modelo nuevo carece de `user_id` y no está allowlisted en `_NON_SCOPED_MODELS` — defensa en capas runtime + boot.
+
 ### Naming convention
 
 | Elemento | Convención | Ejemplos |
@@ -172,11 +174,11 @@ Scenario: Sin header
 |---|---|
 | 1 | Validar inputs (RF-TRX-03 cubre la validación de audio) |
 | 2 | Si `kind=image`: SELECT transcriptions WHERE id=transcription_id AND user_id=bearer.user_id; si no existe → `TRANSCRIPTION_NOT_FOUND` |
-| 3 | Generar `upload_id` (UUID), `nonce` (32 chars random), `bearer_for_upload` (32 chars random) |
+| 3 | Generar `upload_id` (UUID), `nonce` (32 chars random URL-safe), `bearer_for_upload` (32 chars random URL-safe). Computar `upload_bearer_hash = SHA-256(bearer_for_upload).hex()` |
 | 4 | Construir `upload_url`: `<BASE_URL>/api/upload?session=<nonce>` (audio) o `/api/upload-image?session=<nonce>` (image) |
-| 5 | INSERT upload_sessions (id=upload_id, user_id, bearer_id, nonce, kind, transcription_id?, expected_size_bytes, expected_mime_type?, expires_at = now() + 10 min, status='requested') |
+| 5 | INSERT upload_sessions (id=upload_id, user_id, bearer_id, nonce, **upload_bearer_hash**, kind, transcription_id?, expected_size_bytes, expected_mime_type?, expires_at = now() + 10 min, status='requested'). El plaintext `bearer_for_upload` NUNCA se persiste — solo su hash. |
 | 6 | Emitir log `upload_url_requested(user_id, upload_id, kind)` |
-| 7 | Responder `{upload_url, upload_id, bearer: bearer_for_upload, expires_at}` |
+| 7 | Responder `{upload_url, upload_id, bearer: bearer_for_upload, expires_at}`. El plaintext se entrega UNA SOLA VEZ al cliente MCP; si lo pierde, debe pedir un nuevo `request_upload_url`. |
 
 ### Typed Errors
 
@@ -242,7 +244,7 @@ Scenario: Archivo demasiado grande
 | 3 | Si no encontrada: `UPLOAD_SESSION_NOT_FOUND` (404) |
 | 4 | Si `status='consumed'`: `UPLOAD_SESSION_ALREADY_CONSUMED` (409) |
 | 5 | Si `status='requested'` (no se hizo upload): `UPLOAD_SESSION_NOT_FOUND` (404) |
-| 6 | Si `status='expired'` o `now > expires_at + grace`: `UPLOAD_SESSION_NOT_FOUND` |
+| 6 | Si `status='expired'` o `now > expires_at + UPLOAD_SESSION_GRACE_SECONDS`: `UPLOAD_SESSION_NOT_FOUND`. Default grace = 30s para tolerar clock skew cliente/servidor (G8.4 — configurable vía `settings.upload_session_grace_seconds`). |
 | 7 | Adquirir lock global (RF-TRX-04) con timeout 5 s; si falla: `LOCK_BUSY` (503) |
 | 8 | Ejecutar pipeline (RF-TRX-01 si miss, RF-TRX-02 si hit) sobre `<DATA_DIR>/uploads/<upload_id>/original.bin` |
 | 9 | Persistir TranscriptionResult: INSERT transcriptions con `user_id, audio_hash, original_filename, original_size_bytes, duration_seconds, language, num_speakers, text, segments JSONB, metadata JSONB` |
@@ -316,7 +318,7 @@ Scenario: Upload de otro user
 | 1 | Recibir multipart `file` + query `session=<nonce>` + header `Authorization: Bearer <upload_bearer>` |
 | 2 | SELECT upload_sessions WHERE nonce=? AND status='requested' |
 | 3 | Validar `now < expires_at` |
-| 4 | Validar `Authorization` bearer match con el `bearer_for_upload` registrado |
+| 4 | Validar `Authorization` bearer: computar `received_hash = SHA-256(plaintext del header).hex()` y comparar (constant-time, e.g. `hmac.compare_digest`) contra `upload_sessions.upload_bearer_hash`. Si no matchea: `MCP_BEARER_INVALID` (401). |
 | 5 | Validar tamaño del archivo recibido ≤ `expected_size_bytes * 1.05` (margen 5%) |
 | 6 | Si `kind='audio'`: guardar binario en `<DATA_DIR>/uploads/<upload_id>/original.bin` |
 | 7 | Si `kind='image'`: validar mime real (file magic bytes) coincide con `expected_mime_type`; INSERT `images (transcription_id, user_id, filename, mime_type, size_bytes, file_path)`; mover binario a `<DATA_DIR>/blobs/<user_id>/<transcription_id>/<image_id>.<ext>` |
