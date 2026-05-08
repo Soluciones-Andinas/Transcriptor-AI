@@ -150,7 +150,22 @@ def _pyannote_run_pipeline(
     if max_speakers is not None:
         kwargs["max_speakers"] = max_speakers
 
-    annotation = pipeline_obj(wav_path, **kwargs)
+    # Pyannote 3.x defers audio decoding to torchcodec by default. On the
+    # rig (torch 2.8 + cuda 12.8) torchcodec's libavutil mismatch makes
+    # the AudioDecoder import fail silently at boot (logged as warning)
+    # and surface at inference time as ``NameError: name 'AudioDecoder'
+    # is not defined``. Pre-loading via torchaudio (SoX/libsndfile, no
+    # torchcodec) and passing the in-memory dict that pyannote documents
+    # as a supported input bypasses the broken decoder entirely. Cost
+    # is ~10 MB VRAM per 5 min of mono 16 kHz audio — negligible vs.
+    # the model footprint, and the WAV is already mono 16 kHz from
+    # ``normalize_audio`` so no resampling happens.
+    import torchaudio  # noqa: PLC0415 — lazy: keep test envs lighter
+
+    waveform, sample_rate = torchaudio.load(wav_path)
+    audio_input = {"waveform": waveform, "sample_rate": sample_rate}
+
+    annotation = pipeline_obj(audio_input, **kwargs)
     # pyannote returns a pyannote.core.Annotation; itertracks with
     # yield_label=True yields (segment, track_id, speaker_label).
     return [
