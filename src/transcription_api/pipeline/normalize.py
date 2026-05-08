@@ -188,6 +188,32 @@ def _magic_matches(blob: bytes, ext: str) -> bool:
     return False
 
 
+def _detect_ext_by_magic(blob: bytes) -> str | None:
+    """Infer the canonical extension from magic bytes; ``None`` if unknown.
+
+    Mirror of ``_magic_matches`` but answering "what is this?" instead of
+    "is this an X?". Lets ``normalize_audio`` recover when the on-disk
+    suffix is wrong or missing — D-048 documents that the upload endpoint
+    persists every file as ``original.bin`` because ``upload_sessions``
+    has no ``original_filename`` column yet, so the extension-only guard
+    rejects every legitimate audio upload coming through the chunked path.
+
+    ISOBMFF containers (mp4/m4a/mov) collapse to ``"mp4"`` — ffmpeg's
+    audio extraction is identical regardless of brand.
+    """
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WAVE":
+        return "wav"
+    if blob[:4] == b"fLaC":
+        return "flac"
+    if blob[:3] == b"ID3":
+        return "mp3"
+    if len(blob) >= 2 and blob[0] == 0xFF and (blob[1] & 0xE0) == 0xE0:
+        return "mp3"
+    if blob[4:8] == b"ftyp":
+        return "mp4"
+    return None
+
+
 # H-1: hard timeouts so a hung ffmpeg/ffprobe never blocks the worker
 # thread indefinitely. asyncio.to_thread cannot kill a sync call
 # already in progress; the subprocess timeout is the only mechanism
@@ -266,15 +292,25 @@ def normalize_audio(src: Path, output_dir: Path) -> tuple[Path, str, float]:
     ``AudioFormatInvalid`` on validation failure, ``PipelineNormalizeError``
     on ffmpeg/ffprobe failure.
     """
-    ext = src.suffix.lower().lstrip(".")
-    if ext not in _ALLOWED_EXTENSIONS:
-        raise AudioFormatInvalid(
-            f"extensión .{ext} no soportada; soportadas: mp4, mp3, m4a, wav, flac"
-        )
-
-    # CR-3: bounded read instead of read_bytes()[:64] which loaded whole file.
+    # CR-3: bounded read once; reused for fallback inference + magic match.
     head = _read_magic_head(src) if src.is_file() else b""
-    if not _magic_matches(head, ext):
+    ext = src.suffix.lower().lstrip(".")
+
+    if ext not in _ALLOWED_EXTENSIONS:
+        # Magic-byte fallback (D-048 + Capa 4 chunked upload): the upload
+        # endpoint persists every file as ``original.bin`` because
+        # ``upload_sessions`` has no original_filename column yet. The
+        # extension-only guard would reject every legitimate audio upload.
+        # Infer from magic bytes; raise only if both suffix and content
+        # are unrecognized.
+        inferred = _detect_ext_by_magic(head)
+        if inferred is None:
+            raise AudioFormatInvalid(
+                f"extensión .{ext} no soportada y magic-bytes no reconocidos; "
+                "soportadas: mp4, mp3, m4a, wav, flac"
+            )
+        ext = inferred
+    elif not _magic_matches(head, ext):
         raise AudioFormatInvalid(
             f"el archivo declara extensión .{ext} pero su contenido no lo es"
         )

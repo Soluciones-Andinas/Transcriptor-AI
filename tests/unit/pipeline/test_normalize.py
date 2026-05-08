@@ -65,9 +65,13 @@ def test_normalize_rejects_extension_outside_whitelist(tmp_path: Path):
     """
     Spec: SPEC-capa3-pipeline-v1
     Criterion: AC-4 — Given an input with an extension not in the whitelist
-    (mp4/mp3/m4a/wav/flac), When normalize_audio is invoked, Then
-    AudioFormatInvalid is raised before ffmpeg is touched and the reason
-    cites the offending extension.
+    AND content whose magic bytes don't match any audio format, When
+    normalize_audio is invoked, Then AudioFormatInvalid is raised before
+    ffmpeg is touched and the reason cites the offending extension.
+
+    Capa 4 magic-byte fallback: extension alone no longer rejects. The
+    payload here is a Windows PE header (no audio match), so detection
+    falls through to the AudioFormatInvalid branch.
     """
     from transcription_api.pipeline.normalize import (
         AudioFormatInvalid,
@@ -78,6 +82,58 @@ def test_normalize_rejects_extension_outside_whitelist(tmp_path: Path):
     with pytest.raises(AudioFormatInvalid) as exc:
         normalize_audio(bad, tmp_path)
     assert ".exe" in str(exc.value)
+
+
+def test_normalize_accepts_bin_extension_with_wav_magic(tmp_path: Path, monkeypatch):
+    """
+    Spec: SPEC-capa4-mcp-v1 (D-048 fallout)
+    Criterion: chunked upload persists every audio as ``original.bin``
+    because ``upload_sessions`` has no original_filename column. The
+    extension-only guard would reject every legitimate audio. Magic-byte
+    fallback recovers the canonical extension from content alone.
+    """
+    from transcription_api.pipeline import normalize as norm_mod
+    from transcription_api.pipeline.normalize import normalize_audio
+
+    riff_header = b"RIFF" + b"\x00\x00\x00\x00" + b"WAVE" + b"\x00" * 32
+    src = _write_with_ext(tmp_path, "original.bin", riff_header)
+
+    monkeypatch.setattr(
+        norm_mod,
+        "_run_ffmpeg_normalize",
+        lambda src_path, dst_path: dst_path.write_bytes(b"normalized-bytes"),
+    )
+    monkeypatch.setattr(norm_mod, "_probe_duration_seconds", lambda _p: 2.0)
+
+    out_path, audio_hash, duration = normalize_audio(src, tmp_path)
+    assert out_path.suffix == ".wav"
+    assert len(audio_hash) == 64
+    assert duration == pytest.approx(2.0)
+
+
+def test_normalize_accepts_bin_extension_with_mp4_magic(tmp_path: Path, monkeypatch):
+    """
+    Spec: SPEC-capa4-mcp-v1 (D-048 fallout) — ISOBMFF (mp4/m4a) container.
+    The chunked upload of a real .mp4 lands as ``original.bin``; the
+    fallback must infer "mp4" from the ftyp box at offset 4..8.
+    """
+    from transcription_api.pipeline import normalize as norm_mod
+    from transcription_api.pipeline.normalize import normalize_audio
+
+    # ftyp box at offset 4..8 — minimum ISOBMFF signature.
+    ftyp_header = b"\x00\x00\x00\x18" + b"ftyp" + b"isom" + b"\x00" * 48
+    src = _write_with_ext(tmp_path, "original.bin", ftyp_header)
+
+    monkeypatch.setattr(
+        norm_mod,
+        "_run_ffmpeg_normalize",
+        lambda src_path, dst_path: dst_path.write_bytes(b"normalized-bytes"),
+    )
+    monkeypatch.setattr(norm_mod, "_probe_duration_seconds", lambda _p: 5.0)
+
+    out_path, _hash, duration = normalize_audio(src, tmp_path)
+    assert out_path.suffix == ".wav"
+    assert duration == pytest.approx(5.0)
 
 
 def test_normalize_rejects_magic_bytes_mismatch(tmp_path: Path):
