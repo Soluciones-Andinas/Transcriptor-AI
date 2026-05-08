@@ -176,8 +176,8 @@ def migrated_db_url(pg_container: str) -> str:
     return pg_container
 
 
-@pytest_asyncio.fixture
-async def engine(migrated_db_url: str):
+@pytest_asyncio.fixture(autouse=True)
+async def engine(migrated_db_url: str, request):
     """Per-test AsyncEngine pointed at the migrated testcontainer DB.
 
     Also overrides ``transcription_api.db.session.engine`` and
@@ -189,14 +189,43 @@ async def engine(migrated_db_url: str):
     production module's engine, which only happened to work when the
     dev box had ``POSTGRES_HOST`` pointing at the same testcontainer
     via docker-compose. CI without that wiring exposed the gap.
+
+    Marker ``no_engine_override`` opts a test out of the patch — for
+    AC-7 contract tests that verify the production module-level engine
+    is constructed from ``settings`` directly. Under the override, the
+    engine's ``url.username`` would point at the testcontainer
+    (``test``) instead of ``settings.postgres_user`` (``transcription``),
+    making AC-7 unverifiable.
     """
+    if request.node.get_closest_marker("no_engine_override"):
+        # AC-7 contract path: don't touch the production module. The
+        # test reads ``transcription_api.db.engine`` directly and
+        # asserts on URL/pool config — no DB connection is opened, so
+        # POSTGRES_HOST not resolving is fine here.
+        yield None
+        return
+
     from sqlalchemy.ext.asyncio import (
         AsyncSession,
         async_sessionmaker,
         create_async_engine,
     )
 
-    eng = create_async_engine(migrated_db_url, future=True)
+    from transcription_api.config import settings
+
+    # Mirror ``db.session._make_engine`` so the patched ``engine`` is
+    # indistinguishable from the production singleton — including
+    # ``pool_size`` / ``max_overflow`` so ``test_engine_from_settings``
+    # (AC-7) stays valid under the override, and ``pool_pre_ping`` so
+    # connection-recycling behavior matches dev/prod (no surprise
+    # divergence on long-running test sessions).
+    eng = create_async_engine(
+        migrated_db_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_pool_max_overflow,
+        pool_pre_ping=True,
+        future=True,
+    )
     factory = async_sessionmaker(bind=eng, expire_on_commit=False, class_=AsyncSession)
 
     # Patch production module attributes so `scoped_session` (and any
@@ -209,20 +238,33 @@ async def engine(migrated_db_url: str):
     # in middleware. We also patch the name in mcp.middleware so the bearer
     # validation lookup hits the testcontainer DB instead of resolving the
     # default `postgres` host (gaierror on CI runners).
+    import transcription_api.db as _db_pkg
     import transcription_api.db.session as _session_mod
     import transcription_api.mcp.middleware as _mw_mod
 
-    _orig_engine = _session_mod.engine
+    # `db/__init__.py:20` does `from .session import engine, async_session_factory`,
+    # so the package re-export (`_db_pkg.engine`) is a snapshot captured
+    # at IMPORT time. Patching only `db.session.engine` doesn't update
+    # `db.engine` — and `main.py` lifespan reads `_db.engine` via the
+    # package re-export. Same shape applies to mcp.middleware which
+    # imports `async_session_factory` directly. Patch all three sites.
+    _orig_engine_session = _session_mod.engine
+    _orig_engine_pkg = _db_pkg.engine
     _orig_session_factory = _session_mod.async_session_factory
+    _orig_pkg_factory = _db_pkg.async_session_factory
     _orig_mw_factory = _mw_mod.async_session_factory
     _session_mod.engine = eng
+    _db_pkg.engine = eng
     _session_mod.async_session_factory = factory
+    _db_pkg.async_session_factory = factory
     _mw_mod.async_session_factory = factory
     try:
         yield eng
     finally:
-        _session_mod.engine = _orig_engine
+        _session_mod.engine = _orig_engine_session
+        _db_pkg.engine = _orig_engine_pkg
         _session_mod.async_session_factory = _orig_session_factory
+        _db_pkg.async_session_factory = _orig_pkg_factory
         _mw_mod.async_session_factory = _orig_mw_factory
         await eng.dispose()
 

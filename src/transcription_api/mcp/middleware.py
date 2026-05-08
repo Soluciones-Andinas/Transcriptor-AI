@@ -130,8 +130,18 @@ async def _authenticate(plaintext: str) -> tuple[UUID, UUID]:
 
             # AC-14 best-effort last_used_at bump (G11.4 — extracted so
             # tests can monkeypatch the failure path independently of
-            # the lookup).
-            await _bump_last_used_at(session, row.id)
+            # the lookup). Defense-in-depth: also wrap the call here in
+            # case the helper is monkey-patched at the function level
+            # (its internal try/except wouldn't fire then), or a future
+            # refactor surfaces an error type the helper doesn't catch.
+            # AC-14 contract: bump failure MUST NOT 401 the request.
+            try:
+                await _bump_last_used_at(session, row.id)
+            except Exception:
+                logger.warning(
+                    "mcp_bearer_last_used_at_bump_failed_outer",
+                    exc_info=True,
+                )
 
             return row.user_id, row.id
 
