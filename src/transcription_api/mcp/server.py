@@ -18,5 +18,20 @@ contract obvious for reviewers.
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
-mcp_server: FastMCP = FastMCP(name="transcription-api")
+# DNS rebinding protection is overly conservative for an intranet-only,
+# bearer-authenticated server. Defaults assume the FastMCP host is
+# 127.0.0.1/localhost and would only allow Host headers in that allowlist —
+# which 421s every request from a real client connecting via a private IP
+# (e.g. ZeroTier 10.147.17.0/24, Tailscale 100.x, or LAN). Bearer auth +
+# the closed network already establish the trust boundary; the Host check
+# is redundant defense-in-depth that breaks deployment.
+_TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=False,
+)
+
+mcp_server: FastMCP = FastMCP(
+    name="transcription-api",
+    transport_security=_TRANSPORT_SECURITY,
+)
