@@ -36,6 +36,13 @@ jobs:
       JWT_SECRET: ci-test-jwt-secret-do-not-use-in-prod-padding-padding
       OAUTH_TOKEN_ENC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       DATA_DIR: /tmp/transcription-data
+      # MS Entra config — fake values so login flow tests can build
+      # redirect URLs without `KeyError: 'client_id'`. Production values
+      # come from the rig's `.env`. Validators on these fields are loose
+      # (any non-empty string works for URL building).
+      MS_TENANT_ID: ci-test-tenant-id-fake
+      MS_CLIENT_ID: ci-test-client-id-fake
+      MS_CLIENT_SECRET: ci-test-client-secret-fake
 
     steps:
       - uses: actions/checkout@v4

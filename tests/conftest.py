@@ -202,17 +202,28 @@ async def engine(migrated_db_url: str):
     # Patch production module attributes so `scoped_session` (and any
     # other call site reading these via name lookup at call time) uses
     # the testcontainer engine. Snapshot + restore for hermetic teardown.
+    #
+    # `mcp/middleware.py:46` does `from ..db.session import async_session_factory`,
+    # which captures the reference at IMPORT time. Patching only
+    # `db.session.async_session_factory` doesn't update that captured name
+    # in middleware. We also patch the name in mcp.middleware so the bearer
+    # validation lookup hits the testcontainer DB instead of resolving the
+    # default `postgres` host (gaierror on CI runners).
     import transcription_api.db.session as _session_mod
+    import transcription_api.mcp.middleware as _mw_mod
 
     _orig_engine = _session_mod.engine
-    _orig_factory = _session_mod.async_session_factory
+    _orig_session_factory = _session_mod.async_session_factory
+    _orig_mw_factory = _mw_mod.async_session_factory
     _session_mod.engine = eng
     _session_mod.async_session_factory = factory
+    _mw_mod.async_session_factory = factory
     try:
         yield eng
     finally:
         _session_mod.engine = _orig_engine
-        _session_mod.async_session_factory = _orig_factory
+        _session_mod.async_session_factory = _orig_session_factory
+        _mw_mod.async_session_factory = _orig_mw_factory
         await eng.dispose()
 
 
