@@ -165,9 +165,28 @@ def _pyannote_run_pipeline(
     waveform, sample_rate = torchaudio.load(wav_path)
     audio_input = {"waveform": waveform, "sample_rate": sample_rate}
 
-    annotation = pipeline_obj(audio_input, **kwargs)
-    # pyannote returns a pyannote.core.Annotation; itertracks with
-    # yield_label=True yields (segment, track_id, speaker_label).
+    output = pipeline_obj(audio_input, **kwargs)
+
+    # Pyannote 3.5+ wraps the diarization Annotation in a ``DiarizeOutput``
+    # dataclass when called with in-memory audio (returns
+    # ``DiarizeOutput(speaker_diarization=..., embeddings=...)``).
+    # Earlier versions and the path-based legacy call return the
+    # Annotation directly. Handle both shapes defensively — the field
+    # name is documented as ``speaker_diarization`` in the 3.5 release
+    # notes; ``diarization`` is the older alias kept for compatibility.
+    annotation = (
+        getattr(output, "speaker_diarization", None)
+        or getattr(output, "diarization", None)
+        or output
+    )
+
+    if not hasattr(annotation, "itertracks"):
+        raise PipelineDiarizeError(
+            f"pyannote returned unexpected type {type(annotation).__name__}; "
+            "expected pyannote.core.Annotation or a wrapper exposing it"
+        )
+
+    # itertracks(yield_label=True) yields (segment, track_id, speaker_label).
     return [
         (float(seg.start), float(seg.end), str(label))
         for seg, _track, label in annotation.itertracks(yield_label=True)
