@@ -101,8 +101,27 @@ def assign_speakers_to_words(
 
     out: list[dict[str, Any]] = []
     for segment in transcript_segments:
+        # WhisperX's alignment step is a second pass that adds per-word
+        # timestamps; it can fail per-segment on noisy / very-short /
+        # silence-flanked spans, leaving the segment without a "words"
+        # key in the ASR output. Treat that as a single pseudo-word
+        # spanning the entire segment so merge stays uniform — the
+        # downstream consumer just sees one "word" with the segment
+        # text, mid-point speaker assignment still works, and the
+        # response schema invariant ("every segment has a words list")
+        # holds.
+        seg_words = segment.get("words")
+        if not seg_words:
+            seg_words = [
+                {
+                    "start": segment.get("start", 0.0),
+                    "end": segment.get("end", 0.0),
+                    "word": segment.get("text", "").strip(),
+                }
+            ]
+
         new_words: list[dict[str, Any]] = []
-        for word in segment["words"]:
+        for word in seg_words:
             mid = (word["start"] + word["end"]) / 2.0
             speaker = (
                 _speaker_for_midpoint(mid, diarization_segments)

@@ -193,6 +193,54 @@ def test_merge_returns_empty_list_when_transcript_is_empty():
     assert out == []
 
 
+def test_merge_synthesizes_pseudo_word_when_segment_lacks_words_key():
+    """
+    WhisperX alignment can fail per-segment (noisy / very short / silence-
+    flanked spans), leaving the segment without a ``words`` key in the
+    ASR output. The merge must NOT raise KeyError; instead it synthesizes
+    a single pseudo-word spanning the entire segment so the response
+    schema invariant ("every segment has a words list") holds.
+    """
+    from transcription_api.pipeline.merge import assign_speakers_to_words
+
+    transcript = [
+        {"start": 0.0, "end": 1.0, "text": "hola mundo"},  # no "words" key
+        {
+            "start": 1.0,
+            "end": 2.0,
+            "text": "segundo",
+            "words": [{"start": 1.0, "end": 2.0, "word": "segundo"}],
+        },
+    ]
+    diarization = [(0.0, 2.0, "SPEAKER_00")]
+
+    out = assign_speakers_to_words(transcript, diarization)
+
+    assert len(out) == 2
+    assert len(out[0]["words"]) == 1
+    assert out[0]["words"][0]["word"] == "hola mundo"
+    assert out[0]["words"][0]["speaker"] == "SPEAKER_00"
+    assert out[0]["speaker"] == "SPEAKER_00"
+    assert out[1]["words"][0]["word"] == "segundo"
+
+
+def test_merge_synthesizes_pseudo_word_when_words_is_empty_list():
+    """
+    Variant: the segment has the ``words`` key but it's an empty list.
+    Same fallback applies — synthesize one pseudo-word from the segment
+    text so the schema stays consistent.
+    """
+    from transcription_api.pipeline.merge import assign_speakers_to_words
+
+    transcript = [
+        {"start": 0.0, "end": 1.0, "text": "hola", "words": []},
+    ]
+    out = assign_speakers_to_words(transcript, [(0.0, 1.0, "SPEAKER_00")])
+    assert len(out) == 1
+    assert len(out[0]["words"]) == 1
+    assert out[0]["words"][0]["word"] == "hola"
+
+
 def test_merge_assigns_unknown_speaker_when_diarization_is_empty():
     """
     Spec: SPEC-capa3-pipeline-v1
