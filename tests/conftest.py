@@ -25,6 +25,43 @@ import pytest_asyncio
 # Cross-event-loop hygiene for module-level asyncio primitives
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
+def _bypass_mcp_session_manager_run(monkeypatch):
+    """Replace ``mcp_server.session_manager.run()`` with a no-op cm in tests.
+
+    Production lifespan (``main.py``) wraps ``yield`` with
+    ``async with mcp_server.session_manager.run():`` because FastMCP
+    >= 1.10 requires the manager's anyio task group active during
+    request dispatch. The task group binds to the event loop on entry,
+    and pytest-asyncio creates a fresh loop per function-scoped test —
+    so the second test that loads the lifespan would see
+    "RuntimeError: Task group is not initialized" or cross-loop errors
+    from the prior test's bound state.
+
+    Tests don't exercise the FastMCP JSON-RPC path (they go through
+    HTTPX clients hitting the bearer middleware + tool functions
+    directly), so the SDK's task group is dead weight. Stubbing
+    ``run()`` with an async no-op context manager keeps the lifespan
+    code path identical to production while shielding tests from the
+    SDK's loop-affinity trap.
+
+    Robust to import order: if mcp/__init__ has not run yet (some pure
+    unit tests never touch it), the fixture no-ops.
+    """
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _noop_run():
+        yield
+
+    try:
+        from transcription_api.mcp import mcp_server
+    except ImportError:
+        return
+
+    monkeypatch.setattr(mcp_server.session_manager, "run", _noop_run)
+
+
+@pytest.fixture(autouse=True)
 def _reset_orchestrator_lock_per_test():
     """Reset the orchestrator's module-level ``asyncio.Lock`` before each test.
 

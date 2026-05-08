@@ -185,8 +185,15 @@ async def lifespan(app: FastAPI):
         settings.cache_cleanup_interval_seconds,
     )
 
+    # FastMCP >= 1.10 requires session_manager.run() to be active during
+    # request handling — otherwise StreamableHTTP dispatch raises
+    # RuntimeError("Task group is not initialized"). Lazy import keeps the
+    # main↔mcp circular reference resolved only at lifespan time.
+    from .mcp import mcp_server  # noqa: PLC0415
+
     try:
-        yield
+        async with mcp_server.session_manager.run():
+            yield
     finally:
         # Cancel the cleanup loop FIRST so it doesn't observe a half-disposed
         # engine if the dispose step took non-trivial time.
