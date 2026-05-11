@@ -46,7 +46,6 @@ def serialize_image(row: Image) -> dict[str, Any]:
     return {
         "id": str(row.id),
         "filename": row.filename,
-        "caption": row.caption,
         "mime_type": row.mime_type,
         "size_bytes": row.size_bytes,
     }

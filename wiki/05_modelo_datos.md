@@ -113,7 +113,6 @@ Imágenes asociadas a transcripciones (capturas durante reuniones). Metadatos en
 | `transcription_id` | `UUID` | FK `transcriptions(id)` ON DELETE CASCADE | |
 | `user_id` | `UUID` | FK `users(id)` ON DELETE CASCADE | Redundante para queries de scope |
 | `filename` | `TEXT` | NOT NULL | Original del user |
-| `caption` | `TEXT` | NULL | Caption opcional para la minuta |
 | `mime_type` | `TEXT` | NOT NULL | `image/png`, `image/jpeg`, etc. |
 | `size_bytes` | `BIGINT` | NOT NULL | |
 | `file_path` | `TEXT` | NOT NULL | Path relativo en `<DATA_DIR>/blobs/` |
@@ -121,6 +120,8 @@ Imágenes asociadas a transcripciones (capturas durante reuniones). Metadatos en
 | `deleted_at` | `TIMESTAMPTZ` | NULL | Soft delete |
 
 Index: `idx_images_transcription_id`, `idx_images_user_id`.
+
+> **Nota D-083 (2026-05-11)**: la columna `caption` (TEXT NULL) existía originalmente para soportar el tool MCP `attach_image` (RF-IMG-03). Esa tool nunca se implementó; el flujo de imágenes se unificó bajo `request_upload_url(kind="image")` + `POST /api/upload-image` que no acepta caption. Toda fila tenía `caption=NULL`. Se removió la columna en la migración `2c83f1bd7e94_drop_caption_from_images.py`. Si Capa 5 UI introduce un "describir imagen", se agrega una columna nueva con spec dedicado.
 
 ### Tabla `upload_sessions`
 
@@ -180,7 +181,7 @@ Este es el JSON que se devuelve en `get_transcription` y se cachea en el filesys
     "served_from_cache": false
   },
   "images": [
-    { "id": "img_uuid", "filename": "diagrama-arq.png", "caption": "Arquitectura propuesta" }
+    { "id": "img_uuid", "filename": "diagrama-arq.png", "mime_type": "image/png", "size_bytes": 12345 }
   ]
 }
 ```

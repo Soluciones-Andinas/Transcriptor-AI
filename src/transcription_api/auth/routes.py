@@ -105,6 +105,10 @@ async def login(request: Request) -> RedirectResponse:
         secure=True,
         samesite="lax",  # Lax — needed because the OAuth provider redirects back
     )
+    # D-059 / wiki/05 §7: contractual structured log for RF-AUTH-01 step 5.
+    # ``request_id`` is a fresh UUID per login flow start; correlates with
+    # ``auth_callback_received`` when the same browser completes the round-trip.
+    logger.info("auth_login_started request_id=%s", uuid.uuid4())
     return response
 
 
@@ -122,6 +126,12 @@ async def callback(
     extend this with mapping to AUTH_INVALID_STATE / AUTH_TENANT_NOT_ALLOWED /
     AUTH_PROVIDER_UNAVAILABLE.
     """
+    # D-059 / wiki/05 §7: contractual structured log for RF-AUTH-02 step 1.
+    # Emitted before state validation so failure paths still trace the
+    # callback hit; the success flag is finalized at the end of the handler.
+    request_id = uuid.uuid4()
+    logger.info("auth_callback_received request_id=%s", request_id)
+
     # 1. Validate cookie state (RF-AUTH-02 step 1).
     state_cookie = request.cookies.get("oauth_state")
     if not state_cookie:
@@ -289,6 +299,14 @@ async def callback(
             await db.commit()
 
             logger.info("auth_user_created user_id=%s", user.id)
+            # D-059 / wiki/05 §7: contractual log for RF-AUTH-04 first-login
+            # bearer emission. Same event name on the regenerate path so a
+            # SIEM ingest can sum all bearer creations uniformly.
+            logger.info(
+                "mcp_bearer_generated user_id=%s bearer_id=%s name=initial",
+                user.id,
+                bearer.id,
+            )
             is_first_login = True
         else:
             # Subsequent login: update last_login_at + refresh tokens.
@@ -428,6 +446,15 @@ async def regenerate_mcp_token(
             db.add(new_bearer)
             await db.commit()
             await db.refresh(new_bearer)
+            # D-059 / wiki/05 §7: contractual logs for RF-AUTH-07 step 7.
+            # Emitted pair (revoked → generated) per regenerate operation;
+            # SIEM can reconstruct the lifecycle of every bearer.
+            logger.info("mcp_bearer_revoked user_id=%s", user.id)
+            logger.info(
+                "mcp_bearer_generated user_id=%s bearer_id=%s name=regenerated",
+                user.id,
+                new_bearer.id,
+            )
             return {
                 "bearer": {
                     "id": str(new_bearer.id),

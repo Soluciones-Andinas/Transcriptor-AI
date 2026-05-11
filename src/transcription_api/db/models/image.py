@@ -35,7 +35,9 @@ class Image(Base):
         index=True,
     )
     filename: Mapped[str] = mapped_column(Text, nullable=False)
-    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Note (D-083, 2026-05-11): the original schema had a ``caption`` column
+    # for RF-IMG-03 ``attach_image`` (a tool that was never implemented).
+    # Dropped via migration ``2c83f1bd7e94_drop_caption_from_images.py``.
     mime_type: Mapped[str] = mapped_column(Text, nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)

@@ -13,7 +13,7 @@
 >
 > - `request_upload_url(kind="image", transcription_id=T, mime_type, file_size_bytes)` reemplaza RF-IMG-01.
 > - No existe tool `attach_image`: el endpoint `POST /api/upload-image` (RF-IMG-02) inserta la row `images` directamente y la marca `status='uploaded'` en la misma transacción. La metadata se asocia al `transcription_id` en el upload session, no en un tool MCP posterior. RF-IMG-03 queda **sin contraparte en código**; los snippets de "Process Steps" y "Acceptance Criteria" de RF-IMG-01 / RF-IMG-03 se mantienen como referencia de diseño pero **no son la spec ejecutable**.
-> - El campo `caption` de `images` actualmente NO se setea desde ningún tool (drift D-083). Decisión pendiente: agregar parameter a `request_upload_url` o dropear la columna.
+> - El campo `caption` de `images` se **eliminó** del schema (drift D-083 cerrado 2026-05-11 con migración `2c83f1bd7e94_drop_caption_from_images.py`). No había write path: cada fila tenía `caption=NULL`. Si Capa 5 UI introduce un feature "describir imagen", se agrega columna nueva con spec dedicado.
 >
 > RF-IMG-02 (endpoint REST `/api/upload-image`) sigue vigente y es la spec ejecutable del upload binary para imágenes — el cliente lo invoca con el `upload_url` recibido de `request_upload_url(kind="image")`.
 

@@ -80,6 +80,12 @@ async def get_current_user_web(
     try:
         claims = decode_session_token(cookie)
     except SessionInvalid as exc:
+        # D-059 / wiki/05 §7: contractual log when a previously-valid cookie
+        # fails to decode. ``reason`` discriminates invalid signature vs
+        # expired exp claim so operators can spot misconfigured tokens.
+        log.info(
+            "auth_session_expired reason=%s", exc.__class__.__name__
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error_code": "AUTH_NOT_AUTHENTICATED", "reason": "session token invalid or expired"},

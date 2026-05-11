@@ -212,8 +212,17 @@ async def _run_pipeline(
     # ------------------------------------------------------------------
     # 1. Normalize (CPU-bound, run in thread pool to keep the loop free).
     # ------------------------------------------------------------------
+    _stage_started = time.monotonic()
     normalized_wav, audio_hash, duration_float = await asyncio.to_thread(
         _normalize_mod.normalize_audio, file_path, upload_dir
+    )
+    # D-059 / wiki/05 §7: phase log; ``duration_ms`` is wall-clock for
+    # this stage only (not cumulative). Lets operators identify slow
+    # normalize steps from log volume alone.
+    logger.info(
+        "audio_normalized audio_hash=%s duration_ms=%d",
+        audio_hash,
+        int((time.monotonic() - _stage_started) * 1000),
     )
 
     try:
@@ -224,6 +233,13 @@ async def _run_pipeline(
         # try/finally releases the lock.
         # --------------------------------------------------------------
         cached = cache_store.get(user_id, audio_hash)
+        # D-059 / wiki/05 §7: cache_lookup is always emitted; ``hit`` shows
+        # the branch taken. Useful for cache hit-rate dashboards.
+        logger.info(
+            "cache_lookup audio_hash=%s hit=%s",
+            audio_hash,
+            cached is not None,
+        )
         if cached is not None:
             payload = {
                 **cached,
@@ -235,6 +251,7 @@ async def _run_pipeline(
             # 3. STT (GPU-bound — `transcribe` is sync; thread-pool
             # offload keeps the event loop responsive).
             # ----------------------------------------------------------
+            _stage_started = time.monotonic()
             stt_result = await asyncio.to_thread(
                 _stt_mod.transcribe,
                 whisper_model,
@@ -243,6 +260,12 @@ async def _run_pipeline(
             )
             stt_segments = stt_result.get("segments", [])
             detected_language = stt_result.get("language", language)
+            logger.info(
+                "stt_completed audio_hash=%s segments=%d duration_ms=%d",
+                audio_hash,
+                len(stt_segments),
+                int((time.monotonic() - _stage_started) * 1000),
+            )
 
             if not stt_segments:
                 # ALT-2 — silent audio. Skip diarize+merge.
@@ -265,6 +288,7 @@ async def _run_pipeline(
                 # ------------------------------------------------------
                 # 4. Diarize (GPU-bound — same thread-pool rationale).
                 # ------------------------------------------------------
+                _stage_started = time.monotonic()
                 diarization = await asyncio.to_thread(
                     _diarize_mod.diarize,
                     pyannote_pipeline,
@@ -273,9 +297,22 @@ async def _run_pipeline(
                     min_speakers=min_speakers,
                     max_speakers=max_speakers,
                 )
+                logger.info(
+                    "diarize_completed audio_hash=%s segments=%d duration_ms=%d",
+                    audio_hash,
+                    len(diarization),
+                    int((time.monotonic() - _stage_started) * 1000),
+                )
                 # 5. Merge — pure Python, fast enough to stay in the loop.
+                _stage_started = time.monotonic()
                 merged_segments = assign_speakers_to_words(
                     stt_segments, diarization
+                )
+                logger.info(
+                    "merge_completed audio_hash=%s segments=%d duration_ms=%d",
+                    audio_hash,
+                    len(merged_segments),
+                    int((time.monotonic() - _stage_started) * 1000),
                 )
                 unique_speakers = {
                     seg.get("speaker")
@@ -299,7 +336,26 @@ async def _run_pipeline(
 
             # 6. Cache write — store canonical (cache_hit=False) version.
             # A future read overrides to True at lookup time (above).
-            cache_store.put(user_id, audio_hash, payload)
+            try:
+                cache_store.put(user_id, audio_hash, payload)
+                logger.info(
+                    "cache_persisted audio_hash=%s user_id=%s",
+                    audio_hash,
+                    user_id,
+                )
+            except OSError as exc:
+                # D-059 / wiki/05 §7: cache_persist_failed surfaces disk
+                # errors (out of space, permission). We log + re-raise so
+                # the orchestrator's outer try/finally releases the lock
+                # and the caller sees a 500; silently swallowing here
+                # would let the same audio re-run on every retry.
+                logger.error(
+                    "cache_persist_failed audio_hash=%s error=%s "
+                    "error_id=CACHE_PERSIST_FAILED",
+                    audio_hash,
+                    exc.__class__.__name__,
+                )
+                raise
 
         # --------------------------------------------------------------
         # 7. Persist row. Bootstrap insert: the row's user_id IS the
@@ -325,6 +381,18 @@ async def _run_pipeline(
             )
             db.add(row)
             await db.flush()
+
+        # D-059 / wiki/05 §7: closing event for the pipeline run. ``cache_hit``
+        # mirrors the payload metadata so SIEM can compute hit-rate from this
+        # single event without joining cache_lookup logs.
+        logger.info(
+            "transcription_persisted transcription_id=%s user_id=%s "
+            "audio_hash=%s cache_hit=%s",
+            row.id,
+            user_id,
+            audio_hash,
+            payload["metadata"].get("cache_hit", False),
+        )
 
         return {
             "transcription_id": row.id,
