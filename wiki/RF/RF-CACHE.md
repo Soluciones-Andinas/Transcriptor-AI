@@ -183,44 +183,42 @@ No genera HTTP errors. Errores internos:
 
 | Caso | Manejo |
 |---|---|
-| `<hash>/meta.json` no existe | Skip + log WARN (delegar a RF-CACHE-03) |
-| `<hash>/meta.json` corrupto | Skip + log WARN (delegar a RF-CACHE-03) |
-| `shutil.rmtree` falla con `PermissionError` | Log ERROR `cache_purge_permission_error`; continuar con la siguiente |
-| Otro `OSError` durante el barrido | Log ERROR; continuar con la siguiente entrada |
+| `<user_id>/<audio_hash>/result.json` no existe (race con eliminación) | Skip silencioso (`FileNotFoundError` swallowed) |
+| `stat()` falla con `PermissionError` | Log WARN `cache_stat_denied`; skip esa entrada |
+| `unlink()` falla con `PermissionError` | Log WARN `cache_unlink_denied`; continuar con la siguiente |
+| Otro `OSError` durante el barrido | Log y continuar con la siguiente entrada |
 
 ### Special Cases and Variants
 
 - **Caché vacío**: log `cache_cleanup_completed` con `entries_purged=0`. No es error.
-- **Drift de reloj**: si `created_at` está en el futuro, age es negativo, no se purga. Comportamiento aceptable; log INFO `cache_entry_future_dated` con el hash.
-- **Race con escritura nueva**: el lock global (RF-TRX-04) garantiza que cuando la app está escribiendo no hay otro request; el cleanup corre fuera del lock pero opera sobre entradas distintas. Si por algún motivo intenta borrar una entrada en uso, `rmtree` falla → log y skip.
+- **Drift de reloj del filesystem**: TTL se deriva del `mtime` del `result.json`, no de un campo dentro del JSON. Si el filesystem tiene drift (ej: container con clock skew), `now - mtime` puede dar valores raros. En la práctica el cleanup tolera esto: si `mtime` está en el futuro, `now - mtime < 0 < ttl` → la entrada permanece (no se purga). No requiere lógica especial.
+- **Race con escritura nueva**: el lock global (RF-TRX-04) garantiza que cuando la app está escribiendo no hay otro request; el cleanup corre fuera del lock pero opera sobre entradas distintas. Si por algún motivo intenta borrar una entrada en uso, `unlink` falla → log y skip.
 - **Ciclo de cleanup más largo que el intervalo**: el siguiente ciclo espera (no se solapan porque hay una sola task).
+- **Cascade rmdir best-effort**: tras purgar el último `result.json` de un `<audio_hash>/`, se intenta `rmdir(<audio_hash>/)`; tras purgar todos los hashes de un `<user_id>/`, se intenta `rmdir(<user_id>/)`. Errores se swallowean (`OSError` por "no vacío" o "ya borrado" son normales).
 
 ### Data Model Impact
 
-- Elimina `TranscriptionResult` y `CacheMeta` de las entradas vencidas.
+- Elimina archivos `result.json` con TTL expirado.
 - No modifica entradas vigentes.
+- No hay entidad separada `CacheMeta` post-D-027: el contenido del cache es un único `result.json` (ver `wiki/05_modelo_datos.md §1` para el layout actualizado).
 
 ### Expanded Acceptance Criteria (Gherkin)
 
 ```gherkin
 Scenario: Caché con entradas mixtas
-  Given el caché contiene 3 entradas:
-    | hash | created_at (UTC)          | ttl_seconds |
-    | aaa  | 2026-04-29T14:00:00+00:00 | 86400       |
-    | bbb  | 2026-04-30T10:00:00+00:00 | 86400       |
-    | ccc  | 2026-04-28T08:00:00+00:00 | 86400       |
+  Given el caché contiene 3 entradas con mtime:
+    | path                          | mtime (UTC)               |
+    | <uA>/aaa/result.json          | 2026-04-29T14:00:00+00:00 |
+    | <uA>/bbb/result.json          | 2026-04-30T10:00:00+00:00 |
+    | <uB>/ccc/result.json          | 2026-04-28T08:00:00+00:00 |
+    And ttl_seconds = 86400
     And la hora actual es 2026-04-30T15:00:00+00:00
   When se ejecuta el barrido
-  Then aaa permanece (vencida en 1h pero aún vigente, age=25h vs ttl=24h: aaa también vencida)
-    And ccc fue eliminada
-    And bbb permanece
+  Then ccc fue eliminada (age 55h > 24h)
+    And aaa fue eliminada (age 25h > 24h)
+    And bbb permanece (age 5h < 24h)
     And el log cache_cleanup_completed tiene entries_purged=2
     And el log cache_entry_purged aparece 2 veces
-
-# Aclaración: con la hora actual 2026-04-30T15:00:00:
-#   aaa: age = 25h, ttl=24h, age > ttl → ELIMINAR
-#   ccc: age = 55h, ttl=24h, age > ttl → ELIMINAR
-#   bbb: age = 5h, ttl=24h, age < ttl → MANTENER
 
 Scenario: Caché vacío no rompe el barrido
   Given el directorio cache/ existe sin entradas
@@ -228,35 +226,37 @@ Scenario: Caché vacío no rompe el barrido
   Then el log cache_cleanup_completed tiene entries_purged=0
     And no hay errores
 
-Scenario: Entrada con created_at en el futuro
-  Given el caché contiene una entrada con created_at = "2099-01-01T00:00:00+00:00"
+Scenario: Entrada con mtime en el futuro (drift de reloj)
+  Given una entrada cuyo mtime es "2099-01-01T00:00:00+00:00"
   When se ejecuta el barrido
-  Then la entrada permanece
-    And el log contiene cache_entry_future_dated
+  Then la entrada permanece (age es negativo, no expira)
+    And no se emite log de error (drift tolerado silenciosamente)
 
 Scenario: PermissionError al eliminar no aborta el barrido
-  Given una entrada vencida cuyo rmtree lanza PermissionError
+  Given una entrada vencida cuyo unlink lanza PermissionError
     And otra entrada vencida con permisos correctos
   When se ejecuta el barrido
   Then la entrada con permisos correctos fue eliminada
     And la otra permanece
-    And el log contiene cache_purge_permission_error con su hash
+    And el log contiene cache_unlink_denied con su path
 ```
 
 ### Test Traceability
 
 | Test ID | Tipo | Cubre |
 |---|---|---|
-| TP-CACHE-02-pos-01 | Positivo | Mix de entradas: solo se eliminan vencidas |
+| TP-CACHE-02-pos-01 | Positivo | Mix de entradas: solo se eliminan vencidas (mtime-based) |
 | TP-CACHE-02-pos-02 | Positivo | Caché vacío no rompe |
-| TP-CACHE-02-pos-03 | Positivo | Future-dated permanece |
+| TP-CACHE-02-pos-03 | Positivo | Future-dated mtime permanece (drift tolerado) |
 | TP-CACHE-02-pos-04 | Positivo | Log de resumen con contadores correctos |
-| TP-CACHE-02-neg-01 | Negativo (mock) | PermissionError en una entrada → otras se eliminan; log error |
+| TP-CACHE-02-neg-01 | Negativo (mock) | PermissionError en una entrada → otras se eliminan; log warn |
 
 ### No Ambiguities Left
 
-- **Forbidden assumptions**: no se asume orden de iteración del filesystem.
-- **Closed decisions**: regex de hash es `^[0-9a-f]{64}$`; otros directorios se ignoran (no se borran). Esto previene que un directorio rogue del operador se borre por error.
+- **Forbidden assumptions**: no se asume orden de iteración del filesystem; no hay `meta.json` ni `created_at` ISO 8601 dentro de las entradas (todo eso era pre-D-027).
+- **Closed decisions**:
+  - Regex de hash es `^[0-9a-f]{64}$`; directorios que no matchen se ignoran (no se borran). Previene que un directorio rogue del operador se borre por error.
+  - TTL derivado de `mtime` (no de un campo JSON). Justificación: una vez que el cache pasó a single-file post-D-027, agregar un `created_at` interno sería duplicación con la información que el filesystem ya provee. Trade-off: el TTL depende del clock del filesystem (no del clock que la app vea); en práctica ambos vienen del kernel y son coherentes.
 - **Out of scope**: archivado a otro storage antes de eliminar; opción de dry-run.
 
 **TODO explicit = 0**.
@@ -270,105 +270,101 @@ Scenario: PermissionError al eliminar no aborta el barrido
 | Campo | Valor |
 |---|---|
 | ID | RF-CACHE-03 |
-| Título | Skipear entradas con `meta.json` ausente o corrupto |
-| Actor primario | Cleanup Job |
+| Título | Tratar `result.json` corruptos como cache miss en read-time |
+| Actor primario | Pipeline orchestrator (`cache.get`) |
 | Prioridad | Media |
-| Severidad | Mayor |
-| Flujo origen | FL-TRX-02 §7 |
+| Severidad | Menor |
+| Flujo origen | FL-TRX-01 §3 (cache lookup), no FL-TRX-02 |
+
+> **Contrato post-D-027 + D-073** (2026-05-11): el cache ya no tiene un archivo `meta.json` separado con campos parseables (`created_at`, `ttl_seconds`, `schema_version`). El único archivo es `<DATA_DIR>/cache/<user_id>/<audio_hash>/result.json` con el `TranscriptionResult` completo (ver `wiki/05_modelo_datos.md §1`). En consecuencia, "corrupción" significa una sola cosa: el `result.json` no parsea como JSON válido o le faltan campos top-level del schema. El cleanup job (RF-CACHE-02) no inspecciona el contenido — solo opera por `mtime`. La detección de corrupción ocurre en **read-time** dentro de `cache.get`.
 
 ### Precondiciones detalladas
 
 | # | Condición | Verificación |
 |---|---|---|
-| 1 | El barrido (RF-CACHE-02) está iterando entradas | Estado del Cleanup Job |
+| 1 | El orchestrator hizo `cache.get(user_id, audio_hash)` durante un pipeline run | Stack trace en logs |
 
 ### Inputs
 
-Path al directorio `<DATA_DIR>/cache/<user_id>/<audio_hash>/`.
+Path implícito al archivo `<DATA_DIR>/cache/<user_id>/<audio_hash>/result.json` que `cache.get` intenta leer.
 
 ### Process Steps (Happy Path)
 
 | # | Paso | Componente responsable |
 |---|---|---|
-| 1 | Intentar `open(<hash>/meta.json)` | Cleanup |
-| 2 | Si `FileNotFoundError`: emitir log WARN `cache_meta_unreadable` con `audio_hash`, `reason="missing"`. Skip. | Cleanup |
-| 3 | Si lectura OK: `json.load`. Si `JSONDecodeError`: emitir log WARN `cache_meta_unreadable` con `reason="json_decode_error"`. Skip. | Cleanup |
-| 4 | Si JSON parsea pero falta campo obligatorio (`created_at`, `ttl_seconds`): emitir log WARN con `reason="missing_required_field"`. Skip. | Cleanup |
-| 5 | Si campo `created_at` no parsea como ISO 8601: log WARN `reason="invalid_created_at"`. Skip. | Cleanup |
-| 6 | Si todas las validaciones pasan: continuar con RF-CACHE-02 paso 4b | Cleanup |
+| 1 | `cache.get` intenta `Path(entry_path).read_text()` + `json.loads(...)` | `pipeline/cache.py` |
+| 2 | Si `FileNotFoundError`: retornar `None` (cache miss canónico). Sin log. | `cache.py` |
+| 3 | Si `JSONDecodeError` o `OSError` durante read: retornar `None` (tratado como miss) | `cache.py` |
+| 4 | Si JSON parsea pero falla la validación de schema top-level (caller la hace): tratar como miss | orchestrator |
+| 5 | Resultado: el pipeline procede al cache miss branch → re-computa → `cache.put` sobreescribe el archivo corrupto con uno fresco | orchestrator |
 
 ### Outputs
 
 | Campo | Tipo | Destino | Efecto observable |
 |---|---|---|---|
-| Log `cache_meta_unreadable` | log | stdout | Operador ve entradas sospechosas |
-| Skip de la entrada | — | Cleanup loop | El barrido continúa con la siguiente |
+| Cache miss simulado | — | orchestrator | El pipeline se ejecuta de cero como si la entrada no existiera |
+| `result.json` sobreescrito (en cache_miss branch) | file | filesystem | Próxima lectura ya no encuentra corrupción |
 
 ### Typed Errors
 
-No genera HTTP errors.
+No genera HTTP errors al cliente. La corrupción es transparente desde el punto de vista del request.
 
 ### Special Cases and Variants
 
-- **Entrada huérfana persistente**: si la misma entrada aparece corrupta en N ciclos consecutivos (configurable, default 3), el operador puede decidir purgar manualmente. Auto-purga de huérfanas no incluida en MVP.
-- **`schema_version` desconocido**: si `meta.schema_version > 1`, log WARN `cache_meta_schema_version_unknown`. Skip (la app actual no sabe interpretarlo).
+- **Entrada parcial por interrupción de escritura**: el flujo de escritura usa `tmp.write_text + tmp.replace(path)` (atomic rename, `cache.py:88-92`). En POSIX un rename es atómico, así que el archivo nunca queda "a medias" durante una escritura normal. Una corrupción real solo aparece si: (a) el disco se corrompe físicamente, (b) un proceso externo edita el archivo, o (c) el filesystem se desmonta durante el rename (raro).
+- **Cleanup vs corrupción**: RF-CACHE-02 cleanup elimina archivos por `mtime`; no abre el JSON. Una entrada corrupta vencida se borra normalmente sin warning. Una corrupta vigente se descubre en read-time y se sobreescribe en write-time del próximo miss.
+- **Decisión de no loggear corrupción**: el filesystem cache es transparente. Loggear "cache miss por corrupción" inundaría stdout si el disco fuera flaky; el comportamiento as-built es silencioso (`cache.py:74-79`).
 
 ### Data Model Impact
 
-Ninguno (skip-only).
+Ninguno. La sobreescritura es idempotente con respecto al schema.
 
 ### Expanded Acceptance Criteria (Gherkin)
 
 ```gherkin
-Scenario: meta.json ausente
-  Given una entrada <hash>/ con transcription.json pero sin meta.json
-  When se ejecuta el barrido
-  Then el log contiene cache_meta_unreadable con reason="missing"
-    And la entrada permanece (no se elimina)
+Scenario: result.json corrupto se trata como miss y se sobreescribe
+  Given el cache contiene <user_id>/<hash>/result.json con bytes "{ not valid JSON"
+    And el orchestrator recibe una request con esa misma combinación user+hash
+  When cache.get(user_id, audio_hash) ejecuta
+  Then retorna None (cache miss)
+    And el orchestrator corre el pipeline completo (STT + diarize + merge)
+    And cache.put sobreescribe result.json con el resultado fresco
 
-Scenario: meta.json con JSON inválido
-  Given una entrada con meta.json de contenido "{ created_at: not closed"
-  When se ejecuta el barrido
-  Then el log contiene cache_meta_unreadable con reason="json_decode_error"
-
-Scenario: meta.json sin campo created_at
-  Given una entrada con meta.json = {"ttl_seconds": 86400}
-  When se ejecuta el barrido
-  Then el log contiene cache_meta_unreadable con reason="missing_required_field"
-
-Scenario: created_at malformado
-  Given meta.json con created_at = "ayer a las 4"
-  When se ejecuta el barrido
-  Then el log contiene cache_meta_unreadable con reason="invalid_created_at"
-
-Scenario: Schema version futura
-  Given meta.json con schema_version=999
-  When se ejecuta el barrido
-  Then el log contiene cache_meta_schema_version_unknown
-    And la entrada permanece
+Scenario: result.json desaparece entre cleanup y read
+  Given un race donde cleanup borra el archivo justo antes del read
+  When cache.get(user_id, audio_hash) ejecuta
+  Then retorna None (FileNotFoundError → miss)
+    And no se emite log de error (es transparente)
 ```
 
 ### Test Traceability
 
 | Test ID | Tipo | Cubre |
 |---|---|---|
-| TP-CACHE-03-neg-01 | Negativo | meta.json ausente → skip |
-| TP-CACHE-03-neg-02 | Negativo | JSON inválido → skip |
-| TP-CACHE-03-neg-03 | Negativo | Falta campo obligatorio → skip |
-| TP-CACHE-03-neg-04 | Negativo | created_at malformado → skip |
-| TP-CACHE-03-neg-05 | Negativo | schema_version futura → skip |
+| TP-CACHE-03-pos-01 | Positivo | JSON malformado en result.json → cache.get retorna None |
+| TP-CACHE-03-pos-02 | Positivo | FileNotFoundError → cache.get retorna None silenciosamente |
+| TP-CACHE-03-pos-03 | Positivo | Tras un miss por corrupción, cache.put sobreescribe con éxito |
+
+> Los IDs `TP-CACHE-03-neg-01..05` previos (parseo de `meta.json`, validación de `schema_version`) quedan **retirados** post-D-073. El contrato de "manejar corrupción" ya no incluye parsing estricto.
 
 ### No Ambiguities Left
 
-- **Forbidden assumptions**: no se intenta reparar la entrada corrupta; solo skip.
-- **Closed decisions**: la entrada corrupta no se elimina; el operador decide. Justificación: borrarla automáticamente puede destruir trabajo que el operador quiere recuperar manualmente.
-- **Out of scope**: auto-purga de huérfanas tras N ciclos; alertas al operador.
+- **Forbidden assumptions**: no se intenta "reparar" la entrada corrupta inspeccionándola; se sobreescribe en la próxima escritura.
+- **Closed decisions**:
+  - La detección de corrupción vive en read-time (`cache.get`), no en cleanup-time.
+  - La corrupción NO emite log: tratarla como miss común mantiene el cache transparente y previene log spam en discos flaky.
+  - El cleanup (RF-CACHE-02) sigue siendo agnóstico al contenido — opera solo por `mtime`.
+- **Out of scope**: alertas operacionales por corrupción persistente; reparación heurística del archivo.
 
 **TODO explicit = 0**.
 
 ---
 
 ## RF-CACHE-04: Limpiar upload_sessions vencidas y binarios huérfanos
+
+> **Estado as-built (2026-05-11, drift D-074 cerrado)**: implementado en `src/transcription_api/pipeline/cleanup.py::purge_expired_upload_sessions`. Lo invoca `_cleanup_loop` en `main.py` cada `cache_cleanup_interval_seconds` (default 1h) inmediatamente después del purge del cache filesystem. Tests integration en `tests/integration/pipeline/test_cleanup_upload_sessions.py` (5 escenarios: requested+blob, uploaded+blob, dentro de grace, consumed preservado, blob faltante).
+>
+> Orden de operaciones: SELECT candidates → `shutil.rmtree(<uploads_dir>/<id>/)` best-effort por cada fila → UPDATE bulk a `status='expired'` → commit. Si crash entre el rmtree y el UPDATE, la próxima iteración reintenta (filesystem ya limpio, rows aún en `requested/uploaded`). El listener ADR-015 se bypassea con `bypass_scoping(session)` porque el cleanup corre sin un user armado.
 
 ### Execution Sheet
 

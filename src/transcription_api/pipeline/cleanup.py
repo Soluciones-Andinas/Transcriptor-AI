@@ -1,12 +1,18 @@
-"""TTL purge of the per-user filesystem cache.
+"""TTL purge of the per-user filesystem cache + upload session GC.
 
-Spec: SPEC-capa3-pipeline-v1
+Spec: SPEC-capa3-pipeline-v1, SPEC-capa4-mcp-v1 (RF-CACHE-04)
 Covers:
 - AC-10 — Cache entries (``<base>/<user_id>/<audio_hash>/result.json``)
   whose ``mtime`` is older than ``ttl_seconds`` are unlinked.
 - RF-CACHE-02 — Empty parent dirs (audio_hash, then user_id) are removed
   best-effort after their last file is purged so the disk layout reflects
   the post-purge state.
+- RF-CACHE-04 (D-074, 2026-05-11) — Expired ``upload_sessions`` rows
+  (``status IN ('requested','uploaded')`` with ``expires_at + grace_seconds < now``)
+  are marked ``status='expired'`` and their on-disk uploads at
+  ``<uploads_dir>/<upload_id>/`` are removed. Without this, a client
+  that requests upload URLs and never POSTs the bytes leaks rows + (for
+  the ``uploaded`` case) on-disk blobs until the container restarts.
 - Concurrent-safety — Another worker may have unlinked a file between
   our ``getmtime`` and our ``unlink`` calls. ``FileNotFoundError`` and
   ``PermissionError`` are swallowed (logged at WARNING) so a benign race
@@ -20,8 +26,14 @@ this function periodically and is cancelled on shutdown.
 from __future__ import annotations
 
 import logging
+import shutil
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
 logger = logging.getLogger("transcription_api.pipeline.cleanup")
 
@@ -115,3 +127,121 @@ def purge_expired(base_dir: Path, ttl_seconds: int) -> int:
         logger.info("cache_cleanup_purged count=%d base=%s", deleted, base_dir)
 
     return deleted
+
+
+async def purge_expired_upload_sessions(
+    session_factory: async_sessionmaker,
+    uploads_dir: Path,
+    grace_seconds: int,
+) -> int:
+    """Mark expired ``upload_sessions`` rows and remove their on-disk blobs.
+
+    RF-CACHE-04 (D-074): a row in state ``requested`` (URL emitted, bytes
+    never POSTed) or ``uploaded`` (bytes received, ``start_transcription``
+    never called) past ``expires_at + grace_seconds`` is garbage. We
+    transition it to ``expired`` and delete the matching
+    ``<uploads_dir>/<upload_id>/`` directory.
+
+    Order of operations is deliberate:
+        1. SELECT candidates.
+        2. For each: ``shutil.rmtree(<uploads_dir>/<id>/)`` best-effort.
+        3. UPDATE rows to ``status='expired'`` in a single transaction.
+        4. Commit.
+
+    If we crash between (2) and (3) the next iteration retries: the
+    filesystem is already clean (step 2 is idempotent), and the rows
+    still match the SELECT predicate. We avoid the inverse order
+    (UPDATE first, then rmtree) because that one leaves orphan files on
+    disk if the rmtree fails after the row was marked expired.
+
+    ``bypass_scoping`` is mandatory: the cleanup task has no
+    ``session.info['user_id']`` armed (it runs globally for all users),
+    so the ADR-015 fail-closed listener would otherwise raise
+    ``ScopingNotArmedError`` on the SELECT.
+
+    Returns the count of rows whose status was transitioned.
+    """
+    # Lazy imports to keep this module import-light for tooling that
+    # doesn't have SQLAlchemy/asyncpg available (consistent with the
+    # rest of pipeline/*).
+    from sqlalchemy import select, update
+
+    from ..db.models import UploadSession
+    from ..db.scoping import bypass_scoping
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(seconds=grace_seconds)
+    start_ts = time.monotonic()
+    bytes_freed = 0
+    expired_count = 0
+
+    async with session_factory() as session:
+        with bypass_scoping(session):
+            stmt = select(
+                UploadSession.id,
+                UploadSession.user_id,
+                UploadSession.kind,
+            ).where(
+                UploadSession.status.in_(("requested", "uploaded")),
+                UploadSession.expires_at < cutoff,
+            )
+            rows = (await session.execute(stmt)).all()
+
+            for row in rows:
+                upload_dir = Path(uploads_dir) / str(row.id)
+                if upload_dir.is_dir():
+                    try:
+                        bytes_freed += _dir_size(upload_dir)
+                        shutil.rmtree(upload_dir)
+                    except (FileNotFoundError, PermissionError) as exc:
+                        logger.warning(
+                            "upload_session_rmtree_failed "
+                            "upload_id=%s reason=%s error_id=UPLOAD_RMTREE_FAILED",
+                            row.id,
+                            type(exc).__name__,
+                        )
+                logger.info(
+                    "upload_session_expired upload_id=%s user_id=%s kind=%s",
+                    row.id,
+                    row.user_id,
+                    row.kind,
+                )
+
+            if rows:
+                update_stmt = (
+                    update(UploadSession)
+                    .where(UploadSession.id.in_([row.id for row in rows]))
+                    .values(status="expired")
+                )
+                await session.execute(update_stmt)
+                await session.commit()
+                expired_count = len(rows)
+
+    duration_ms = int((time.monotonic() - start_ts) * 1000)
+    logger.info(
+        "upload_session_cleanup_completed "
+        "entries_purged=%d bytes_freed=%d duration_ms=%d",
+        expired_count,
+        bytes_freed,
+        duration_ms,
+    )
+    return expired_count
+
+
+def _dir_size(path: Path) -> int:
+    """Sum the size of every file under ``path`` (one-level deep is the
+    common case for upload sessions, but recurse safely just in case).
+
+    Swallows errors per-file so a single permission glitch doesn't fail
+    the whole purge cycle.
+    """
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        return total
+    return total

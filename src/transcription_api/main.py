@@ -32,7 +32,7 @@ from .config import settings
 from .gpu import AcceleratorInfo, detect_accelerator
 from .pipeline import diarize as _diarize
 from .pipeline import stt as _stt
-from .pipeline.cleanup import purge_expired
+from .pipeline.cleanup import purge_expired, purge_expired_upload_sessions
 
 logger = logging.getLogger("transcription_api")
 
@@ -271,6 +271,30 @@ async def _cleanup_loop() -> None:
         except Exception:  # noqa: BLE001
             logger.exception(
                 "cache_cleanup_iteration_failed error_id=CACHE_CLEANUP_LOOP_ERROR"
+            )
+
+        # D-074 / RF-CACHE-04: GC of expired upload_sessions rows + their
+        # on-disk blobs. Runs after the cache purge so a single iteration
+        # cleans both surfaces. Failures here mirror the cache-purge
+        # handling — caught + logged so a flaky DB hiccup doesn't kill
+        # the loop and let upload_sessions grow unbounded.
+        try:
+            # Lazy import keeps main.py importable on dev boxes without
+            # async_sessionmaker in scope (e.g. when running tooling that
+            # doesn't boot the DB layer).
+            from .db.session import async_session_factory  # noqa: PLC0415
+
+            await purge_expired_upload_sessions(
+                async_session_factory,
+                settings.uploads_dir,
+                settings.upload_session_grace_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "upload_session_cleanup_iteration_failed "
+                "error_id=UPLOAD_CLEANUP_LOOP_ERROR"
             )
 
 

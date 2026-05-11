@@ -110,7 +110,7 @@ Errores propios de RF-TRX-01:
 
 | Código | Causa | Trigger | Respuesta |
 |---|---|---|---|
-| `INTERNAL_ERROR` | Excepción no clasificada en orquestación | Cualquier `Exception` no atajada por RF-TRX-03/04/05/06 | HTTP 500 + `{"error_code": "INTERNAL_ERROR", "request_id": "..."}` + log `request_failed` |
+| `INTERNAL_ERROR` | Excepción no clasificada en orquestación | Cualquier `Exception` no atajada por RF-TRX-03/04/05/06 | HTTP 500 envelope canónico `{"detail": {"error_code": "INTERNAL_ERROR", "reason": "see error_id in logs", "error_id": "<UUID>"}}` (ver `wiki/05_modelo_datos.md §8`, drift D-076). El campo `error_id` (no `request_id`) correlaciona la respuesta con el log estructurado del servidor; H-3 stripping policy evita leakar `str(exc)` con paths o ffmpeg stderr. |
 
 ### Special Cases and Variants
 
@@ -568,12 +568,12 @@ Audio normalizado WAV en tempfile.
 
 | # | Paso | Componente responsable |
 |---|---|---|
-| 1 | Wrap llamada a WhisperX en `try/except` capturando `torch.cuda.OutOfMemoryError` y `RuntimeError` con mensaje "CUDA out of memory" | Handler |
-| 2 | Wrap llamada a pyannote en `try/except` similar | Handler |
-| 3 | Si `torch.cuda.OutOfMemoryError`: ejecutar `torch.cuda.empty_cache()`, emitir log ERROR `request_failed` con `error_code=CUDA_OOM`, `stage="stt"` o `"diarize"` | Handler |
-| 4 | Si excepción no clasificada del modelo: emitir log ERROR con `error_code=MODEL_FAILURE`, `stage`, `exception_class` | Handler |
-| 5 | Liberar lock global y borrar tempfiles en `finally` | Handler |
-| 6 | Responder HTTP 500 + `{"error_code": "CUDA_OOM" o "MODEL_FAILURE", "stage": "...", "request_id": "..."}` | Handler |
+| 1 | Wrap llamada a WhisperX en `try/except` capturando `torch.cuda.OutOfMemoryError` y `RuntimeError` con mensaje "CUDA out of memory" | `pipeline/stt.py::_classify_cuda_error` |
+| 2 | Wrap llamada a pyannote en `try/except` similar | `pipeline/diarize.py` |
+| 3 | Si `torch.cuda.OutOfMemoryError`: levantar `GPUError(detail="oom", ...)` desde el wrapper; emitir log ERROR `request_failed` con `error_code=GPU_ERROR`, `extra.detail="oom"`, `stage="stt"` o `"diarize"`. **Drift D-079 (2026-05-11)**: la spec previa decía "ejecutar `torch.cuda.empty_cache()` aquí" pero el código no lo hace — la asunción de que `empty_cache()` libera VRAM real es frágil (`torch.cuda.caching_allocator` reusa bloques internamente, no devuelve memoria al SO). El operador del rig se basa en logs de OOM consecutivos como signal para reiniciar el container; no hay recovery automático en-process. | Handler |
+| 4 | Si excepción no clasificada del modelo: emitir log ERROR con `error_code=PIPELINE_DIARIZE_ERROR` o `GPU_ERROR detail="runtime"`, `stage`, `exception_class` (reemplaza el viejo `MODEL_FAILURE`, ver `wiki/05_modelo_datos.md §8`) | Handler |
+| 5 | Liberar lock global y borrar tempfiles en `finally` | `pipeline/orchestrator.py` |
+| 6 | Responder HTTP 500 + envelope tipado `{"detail": {"error_code": "GPU_ERROR" o "PIPELINE_DIARIZE_ERROR", "reason": "see error_id in logs", "error_id": "..."}}` (envelope canónico §8). Si el caller MCP es `start_transcription`, el error_code se propaga al tool result con el mismo nombre. | Handler |
 
 ### Outputs
 
@@ -588,12 +588,12 @@ Audio normalizado WAV en tempfile.
 
 | Código | HTTP | Causa | Trigger |
 |---|---|---|---|
-| `CUDA_OOM` | 500 | GPU sin memoria | `torch.cuda.OutOfMemoryError` o RuntimeError CUDA OOM |
-| `MODEL_FAILURE` | 500 | Crash del modelo no clasificado | Cualquier excepción en `transcribe()` o `diarize()` no clasificada |
+| `GPU_ERROR` | 500 | GPU sin memoria o crash del modelo | `torch.cuda.OutOfMemoryError` (mappea a `detail="oom"`) o `RuntimeError` CUDA (`detail="runtime"`). Reemplaza los viejos `CUDA_OOM` y `MODEL_FAILURE` (drift D-052, D-077). |
+| `PIPELINE_DIARIZE_ERROR` | 500 | Excepción durante pyannote no clasificada como GPU | Cualquier `Exception` no `GPUError` levantada por `pipeline/diarize.py` |
 
 ### Special Cases and Variants
 
-- **OOM repetido**: si dos requests consecutivos producen OOM, el operador debe revisar (probable VRAM con basura). Mitigación: alerta basada en log si `CUDA_OOM` ocurre 2+ veces en 1h.
+- **OOM repetido**: si dos requests consecutivos producen `GPU_ERROR detail="oom"`, el operador del rig debe reiniciar el container — no hay recovery automático in-process (drift D-079: `torch.cuda.empty_cache()` no libera memoria real al SO porque el caching allocator reusa bloques internamente). Mitigación recomendada: alerta basada en log si `GPU_ERROR detail="oom"` ocurre 2+ veces en 1h.
 - **Modelo no carga al startup**: lifespan falla; el contenedor reinicia (Docker healthcheck).
 
 ### Data Model Impact

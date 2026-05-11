@@ -54,7 +54,7 @@ C4Container
         Container(merge, "Ensamblador", "Lógica Python", "Asocia palabras a hablantes")
         Container(mcp, "MCP Server", "FastMCP (Streamable HTTP) montado en /mcp + bearer middleware", "Tools + Resources con auth ephemeral bearer")
         ContainerDb(pg, "PostgreSQL 16", "SQL", "users, oauth_tokens, transcriptions, images")
-        ContainerDb(cache, "Caché Filesystem", "FS local", "Por audio_hash, TTL 24h")
+        ContainerDb(cache, "Caché Filesystem", "FS local", "Per-user (user_id, audio_hash), TTL 24h (D-027)")
         ContainerDb(blobs, "Blobs Filesystem", "FS local", "Modelos, uploads temp, image files")
         Container(cleanup, "Cleanup Job", "asyncio task", "Purga caché vencido")
     }
@@ -100,7 +100,7 @@ sequenceDiagram
     CC->>MCP: tool start_transcription(upload_id, language, max_speakers)
     MCP->>N: normalizar /data/uploads/upload_id
     N-->>MCP: WAV + sha256 audio_hash
-    MCP->>FS: lookup cache audio_hash
+    MCP->>FS: lookup cache (user_id, audio_hash)
     alt cache hit
         FS-->>MCP: TranscriptionResult JSON
         MCP->>PG: insert transcription_history vinculada al user
@@ -111,7 +111,7 @@ sequenceDiagram
         MCP->>D: diarizar(WAV, hints)
         D-->>MCP: speaker segments
         MCP->>MCP: merge transcript + speakers
-        MCP->>FS: persist cache audio_hash
+        MCP->>FS: persist cache (user_id, audio_hash)
         MCP->>PG: insert transcription + transcription_history
         MCP-->>CC: transcription_id
     end
@@ -179,6 +179,7 @@ sequenceDiagram
 | [ADR-015](ADR/ADR-015.md) | Listener de scoping fail-closed + `bypass_scoping` context manager | Aceptada | 2026-05-05 | §3, §8 — query sin `user_id` armado raise `ScopingNotArmedError`; bypass explícito vía context manager |
 | [ADR-016](ADR/ADR-016.md) | Defensa en capas para per-user scoping (startup classification + listener) | Aceptada | 2026-05-07 | §8 — startup guard complementa listener fail-closed; modelo nuevo sin `user_id` rompe boot en lugar de leak silencioso |
 | [ADR-017](ADR/ADR-017.md) | Upload con bearer efímero per-upload (S3-style) | Aceptada | 2026-05-11 | §3, §4 — Privacy: blast radius ≤10 min vs bearer MCP indefinido; formaliza patrón as-built en Capa 4 (`upload_bearer_hash` + `hmac.compare_digest`) |
+| [ADR-018](ADR/ADR-018.md) | Desactivación de DNS rebinding protection en MCP transport | Aceptada | 2026-05-11 | §3, §8 — bearer auth + red privada como frontera de confianza; allowlist por CIDR sería frágil para ZeroTier/LAN |
 
 ## 8. Seguridad, Observabilidad y Resiliencia
 

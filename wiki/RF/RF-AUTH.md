@@ -394,9 +394,9 @@ Scenario Outline: Rechazo de tenants externos
 | 2 | Si inválida: 401 + `AUTH_NOT_AUTHENTICATED` |
 | 3 | SELECT user from `users` WHERE id = JWT.sub |
 | 4 | SELECT bearer activo from `mcp_bearers` WHERE user_id=... AND revoked_at IS NULL |
-| 5 | Si no hay bearer activo (caso raro): crear uno (similar a RF-AUTH-04) |
+| 5 | Si no hay bearer activo (caso raro post-revoke manual): NO se auto-crea uno. `bearer_payload = None` se devuelve en la response. El UI (RF-AUTH-08) muestra un banner indicando que el user debe hacer `POST /auth/regenerate-mcp-token` para emitir uno nuevo. **Drift D-060 (2026-05-11)**: la spec previa decía "crear uno automáticamente" pero el código no lo hace; mantener la regeneración explícita es coherente con Privacy > Simplicity (no emitir plaintext en endpoints idempotentes de lectura). |
 | 6 | Si hay flash cookie `mcp_bearer_flash`: incluir el plaintext en response Y borrar la cookie |
-| 7 | Responder JSON: `{user: {id, email, display_name}, bearer: {id, plaintext_or_null, created_at}, mcp_url: <BASE_URL>/mcp}` |
+| 7 | Responder JSON: `{user: {id, email, display_name}, bearer: {id, name, plaintext_or_null, created_at}, mcp_url: <BASE_URL>/mcp}`. El campo `bearer.name` (string, valores `"initial"` o `"regenerated"`) lo expone el código desde `mcp_bearers.name` y la UI lo usa para distinguir entre bearer original y regenerado (drift D-061). |
 
 ### Typed Errors
 
@@ -455,7 +455,7 @@ Scenario: User no logueado
 | 5 | INSERT mcp_bearers (user_id, token_hash, name='regenerated', created_at) |
 | 6 | Commit |
 | 7 | Emitir logs `mcp_bearer_revoked(old_bearer_id)` y `mcp_bearer_generated(new_bearer_id)` |
-| 8 | Responder JSON `{bearer: {id, plaintext, created_at}}` |
+| 8 | Responder JSON `{bearer: {id, name, plaintext, created_at}}`. El campo `bearer.name` (string, `"regenerated"` para los bearers creados aquí; `"initial"` para los de RF-AUTH-04) lo expone el código desde `mcp_bearers.name` (drift D-061). |
 
 ### Special Cases
 

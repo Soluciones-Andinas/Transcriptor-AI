@@ -11,7 +11,7 @@
 |---|---|---|---|---|---|
 | RF-MCP-00 | Contrato base del módulo MCP (transversal) | — | — | — | — |
 | RF-MCP-01 | Tool `request_upload_url` | Bearer válido | Bearer activo | `kind, file_size_bytes, mime_type?, transcription_id?` | `{upload_url, upload_id, bearer, expires_at}` |
-| RF-MCP-02 | Tool `start_transcription` | Bearer válido | upload uploaded | `upload_id, language?, max_speakers?, min_speakers?` | `{transcription_id, status, cache_hit}` |
+| RF-MCP-02 | Tool `start_transcription` | Bearer válido | upload uploaded | `upload_id, language?, num_speakers?, min_speakers?, max_speakers?` | `{transcription_id, status, cache_hit}` |
 | RF-MCP-03 | Endpoint REST `POST /api/upload` (audio + image) | Bearer válido | upload session vigente | multipart `file` + bearer + nonce | `{ok, upload_id}` o `{ok, image_id}` |
 | RF-MCP-04 | Tool `list_my_transcriptions` | Bearer válido | — | `limit?, offset?, sort?` | array paginado |
 | RF-MCP-05 | Tool `search_my_transcriptions` | Bearer válido | — | `query, limit?` | resultados ranked |
@@ -232,8 +232,9 @@ Scenario: Archivo demasiado grande
 |---|---|---|---|
 | `upload_id` | UUID | Sí | Debe existir en `upload_sessions` con `status='uploaded'`, `kind='audio'`, owner del bearer |
 | `language` | string | No (default `"es"`) | ISO 639-1 |
+| `num_speakers` | int | No (default `None`) | 1-16. **Hint hard** a pyannote: si se provee, fuerza ese número exacto de speakers (override de min/max). Drift D-084 (2026-05-11): el código de `start_transcription` acepta este parámetro pero la spec previa no lo documentaba. |
 | `max_speakers` | int | No (default 8) | 1-16 |
-| `min_speakers` | int | No (default 1) | 1 ≤ min ≤ max ≤ 16 |
+| `min_speakers` | int | No (default 1) | 1 ≤ min ≤ max ≤ 16. Si `num_speakers` también está presente, este se ignora. |
 
 ### Process Steps
 

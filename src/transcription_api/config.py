@@ -152,9 +152,11 @@ class Settings(BaseSettings):
     cache_cleanup_interval_seconds: int = Field(
         default=3600, alias="CACHE_CLEANUP_INTERVAL_SECONDS", gt=0
     )
-    upload_session_grace_seconds: int = Field(
-        default=300, alias="UPLOAD_SESSION_GRACE_SECONDS", ge=0
-    )
+    # D-051 fix: ``upload_session_grace_seconds`` was previously declared
+    # twice — once above (default=30) and once here (default=300). Python
+    # class-body semantics meant the second declaration won and the
+    # effective grace window was 5 minutes, ~10x the intended value. The
+    # canonical declaration lives above; this is the cache/cleanup block.
     # Capa 4 — TTL del upload session ephemeral (RF-MCP-01 step 6:
     # `request_upload_url` setea `expires_at = now() + this`). Default 10 min,
     # override per-deploy via UPLOAD_SESSION_TTL_SECONDS.
