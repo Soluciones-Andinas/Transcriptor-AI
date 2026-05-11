@@ -4,6 +4,8 @@
 **Architecture**: [`02_arquitectura.md`](../02_arquitectura.md) §3 (componente A)
 **Hardening level**: Execution-Normative
 
+> **Estado del módulo (2026-05-11)**: RF-UI-01 y RF-UI-02 quedan **Pendiente Capa 5**. El backend ya expone los endpoints de soporte (`/auth/login`, `/auth/me`, `/auth/regenerate-mcp-token`), pero el bundle React + Vite + Tailwind no está implementado todavía (no existe `src/transcription_api/ui/` ni archivos `.tsx`/`.jsx` en el repo). Esta spec se mantiene como contrato de diseño para cuando Capa 5 arranque; no usar como evidencia de que el feature está hecho.
+
 ## Tabla resumen
 
 | ID | Título | Actor | Pre-condición | Entradas | Salidas |

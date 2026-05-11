@@ -31,7 +31,13 @@ _TRANSPORT_SECURITY = TransportSecuritySettings(
     enable_dns_rebinding_protection=False,
 )
 
+# D-081 fix: FastMCP's default ``streamable_http_path="/mcp"`` would produce
+# the route ``/mcp/mcp`` once main.py mounts this sub-app at ``/mcp``. Setting
+# the internal route to ``/`` makes the public URL ``${PUBLIC_BASE_URL}/mcp``,
+# which is what the wiki (RF-MCP-00, ADR-011) and ``_mcp_url()`` in auth/routes
+# already advertise via ``/auth/me``.
 mcp_server: FastMCP = FastMCP(
     name="transcription-api",
     transport_security=_TRANSPORT_SECURITY,
+    streamable_http_path="/",
 )

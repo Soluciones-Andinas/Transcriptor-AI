@@ -357,49 +357,86 @@ Estos eventos son contractuales: los RFs los referencian para criterios de acept
 
 Usados en respuestas HTTP/MCP de error y en el campo `error_code` de logs `*_failed`.
 
+> **Convención del envelope** (drift D-076 del audit 2026-05-11):
+> Los endpoints REST envuelven los errores 5xx en un sobre con shape
+> `{"detail": {"error_code": ..., "reason": ..., "error_id": ...}}` (FastAPI default).
+> El campo `reason` es siempre el literal `"see error_id in logs"` para los 5xx
+> (H-3 stripping policy: evita leakar `str(exc)` con paths, ffmpeg stderr, CUDA versions).
+> El campo `error_id` es un UUID nuevo por error (no por request) que permite
+> correlacionar la respuesta del cliente con el log estructurado del servidor.
+> Los errores 4xx pueden llevar `detail` literal informativo del lado del cliente
+> (extensión inválida, parámetro fuera de rango).
+
+> **Convención del bearer canal** (drift D-052 del audit 2026-05-11):
+> Algunos códigos tienen aliases vivos en el código porque el mismo concepto se
+> emite desde dos canales con nombres distintos. La columna **Emisor** indica
+> qué módulo emite cada código. Cuando aparecen dos códigos con la misma causa,
+> el de "MCP tool" es el nombre canónico del SDK (Anthropic MCP) y el de "REST"
+> es el reconciliado a `${MODULE}_${RESOURCE}_${ERROR}`. Unificación pendiente
+> (no bloqueante para el contrato externo, ambos están en uso).
+
 ### Auth y autorización
 
-| Código | HTTP | Causa |
-|---|---|---|
-| `AUTH_NOT_AUTHENTICATED` | 401 | Cookie web ausente o inválida |
-| `AUTH_INVALID_OAUTH_CODE` | 400 | `/auth/callback` con code inválido |
-| `AUTH_TENANT_NOT_ALLOWED` | 403 | OID de un tenant que no es Sandinas |
-| `MCP_BEARER_INVALID` | 401 | Bearer no existe en `mcp_bearers` o está revocado |
-| `MCP_BEARER_REVOKED` | 401 | Bearer existió pero fue revocado |
+| Código | HTTP | Emisor | Causa |
+|---|---|---|---|
+| `AUTH_NOT_AUTHENTICATED` | 401 | REST `auth/dependencies` | Cookie web ausente o inválida |
+| `AUTH_INVALID_STATE` | 302 → `/login?error=` | REST `auth/routes` | Cookie `oauth_state` ausente / expirada / state query mismatch |
+| `AUTH_INVALID_OAUTH_CODE` | 302 → `/login?error=` | REST `auth/routes` | `/auth/callback` con code inválido (4xx desde MS Entra) |
+| `AUTH_TENANT_NOT_ALLOWED` | 302 → `/login?error=` | REST `auth/routes` | OID de un tenant que no es Sandinas |
+| `AUTH_PROVIDER_UNAVAILABLE` | 302 → `/login?error=` | REST `auth/routes` | MS Entra timeout / 5xx / id_token signature failure tras retry / claim faltante |
+| `MCP_BEARER_INVALID` | 401 | MCP middleware | Bearer no existe en `mcp_bearers` |
+| `MCP_BEARER_REVOKED` | 401 | MCP middleware | Bearer existió pero fue revocado (`revoked_at IS NOT NULL`) |
 
 ### Validación
 
-| Código | HTTP | Causa |
-|---|---|---|
-| `INVALID_FORMAT` | 400 | Archivo vacío o ffmpeg falla |
-| `UNSUPPORTED_EXTENSION` | 400 | Extensión no permitida |
-| `FILE_TOO_LARGE` | 413 | Excede `MAX_UPLOAD_MB` |
-| `INVALID_PARAMETER` | 400 | Parámetro fuera de rango (ej: min_speakers > max_speakers) |
+| Código | HTTP | Emisor | Causa |
+|---|---|---|---|
+| `AUDIO_FORMAT_INVALID` | 400 | REST `api/transcriptions` | Extensión + magic-byte fallback fallaron, o ffmpeg falla en normalize. Reemplaza el viejo `INVALID_FORMAT` + `UNSUPPORTED_EXTENSION` (drift D-052, D-080) |
+| `AUDIO_TOO_LARGE` | 413 | REST `api/transcriptions` | Excede `MAX_UPLOAD_MB` (alias canónico REST-side) |
+| `FILE_TOO_LARGE` | 413 | MCP tool `request_upload_url` | Excede `MAX_UPLOAD_MB` (alias MCP-side) — mismo significado que `AUDIO_TOO_LARGE`; emitidos en sitios distintos |
+| `INVALID_PARAMETER` | 400 | MCP tools (clamp), MCP `upload` (MIME no permitido) | Parámetro fuera de rango (`min_speakers > max_speakers`), enum inválido (`kind` ≠ {audio,image}), MIME inválido para `kind=image` |
 
 ### Concurrencia y procesamiento
 
-| Código | HTTP | Causa |
-|---|---|---|
-| `LOCK_BUSY` | 503 | Lock global ocupado |
-| `CUDA_OOM` | 500 | GPU sin memoria |
-| `MODEL_FAILURE` | 500 | Crash no clasificado del modelo |
-| `MODELS_NOT_LOADED` | 503 | Whisper o pyannote no están en estado `ready` (lifespan startup pendiente o falló). Surface por RF-MCP-02 / RF-TRX. |
-| `PIPELINE_TIMEOUT` | 504 | Pipeline excedió `pipeline_timeout_seconds`. Surface por RF-MCP-02 / RF-TRX. |
+| Código | HTTP | Emisor | Causa |
+|---|---|---|---|
+| `GPU_BUSY` | 503 | REST `api/transcriptions` | Lock global ocupado (alias canónico REST-side). `Retry-After: 600` |
+| `LOCK_BUSY` | 503 | MCP tool `start_transcription` | Lock global ocupado (alias MCP-side) — mismo significado que `GPU_BUSY` |
+| `GPU_ERROR` | 500 | REST `api/transcriptions` | Fallo GPU con campo `detail ∈ {oom, runtime}` en el body. `detail="oom"` corresponde al viejo `CUDA_OOM`; `detail="runtime"` al viejo `MODEL_FAILURE` (drift D-052, D-077) |
+| `PIPELINE_NORMALIZE_ERROR` | 500 | REST `api/transcriptions` | Excepción durante ffmpeg normalize fuera de los casos `AUDIO_FORMAT_INVALID` |
+| `PIPELINE_DIARIZE_ERROR` | 500 | REST `api/transcriptions` | Excepción durante pyannote diarize fuera de los casos `GPU_ERROR` |
+| `PIPELINE_TIMEOUT` | 504 | REST + MCP | Pipeline excedió `pipeline_timeout_seconds` |
+| `REQUEST_TIMEOUT` | 504 | REST `main.py` middleware | Request total excedió `request_timeout_seconds` (envuelve el pipeline + I/O) |
+| `MODELS_NOT_LOADED` | 503 | REST + MCP `runtime/readiness` | Whisper o pyannote no están en estado `ready` (lifespan startup pendiente o falló) |
 
 ### Recursos
 
-| Código | HTTP | Causa |
-|---|---|---|
-| `UPLOAD_SESSION_NOT_FOUND` | 404 | upload_id desconocido o expirado |
-| `UPLOAD_SESSION_ALREADY_CONSUMED` | 409 | Ya se llamó `start_transcription` |
-| `TRANSCRIPTION_NOT_FOUND` | 404 | transcription_id no existe o no es del user |
-| `IMAGE_NOT_FOUND` | 404 | image_id no existe o no es del user |
+| Código | HTTP | Emisor | Causa |
+|---|---|---|---|
+| `UPLOAD_SESSION_NOT_FOUND` | 404 | REST + MCP | upload_id desconocido, expirado, no propietario, o **ya consumido** — colapso intencional para no leakar existencia (AC-10 review-fix) |
+| `UPLOAD_SESSION_ALREADY_CONSUMED` | 409 | MCP tool `start_transcription` | Alias retained: emitido cuando el caller ES el dueño y la row está en `status='consumed'`. Para terceros: ver `UPLOAD_SESSION_NOT_FOUND` |
+| `TRANSCRIPTION_NOT_FOUND` | 404 | REST + MCP | transcription_id no existe o no es del user |
+| `IMAGE_NOT_FOUND` | 404 | MCP resource `image_resource` | image_id no existe o no es del user |
 
-### Genéricos
+### Genéricos / Operacionales
 
-| Código | HTTP | Causa |
+| Código | HTTP | Emisor | Causa |
+|---|---|---|---|
+| `INTERNAL_ERROR` | 500 | REST `_stripped_500` | Excepción no clasificada. Body envelope con `error_id` para correlación con log |
+| `DB_POOL_EXHAUSTED` | 503 | REST `main.py` | Postgres connection pool sin slots libres en `pool_timeout_seconds`. Operacional, no de aplicación |
+
+### Códigos retirados (referenciados en wiki vieja, no emitidos por código)
+
+| Código retirado | Reemplazo | Drift |
 |---|---|---|
-| `INTERNAL_ERROR` | 500 | Excepción no clasificada |
+| `INVALID_FORMAT` | `AUDIO_FORMAT_INVALID` | D-052 |
+| `UNSUPPORTED_EXTENSION` | `AUDIO_FORMAT_INVALID` (con magic-byte fallback, D-080) | D-052, D-080 |
+| `CUDA_OOM` | `GPU_ERROR` con `detail="oom"` | D-052, D-077 |
+| `MODEL_FAILURE` | `GPU_ERROR` con `detail="runtime"` o `PIPELINE_DIARIZE_ERROR` | D-052, D-077 |
+
+> Los códigos retirados pueden seguir apareciendo en docstrings o tests legados;
+> el agente que toque esos sitios debe migrarlos al nombre as-built. Sincronización
+> pendiente en `wiki/06_matriz_pruebas_RF.md` y en los §Typed Errors de RF-TRX-03/04/05.
 
 ## 9. Versionado
 

@@ -22,13 +22,15 @@ Criterios de éxito medibles:
 
 ## 2. Componentes del Sistema
 
-**A. Interfaz Web (UI mínima de onboarding)**
+**A. Interfaz Web (UI mínima de onboarding)** — *Pendiente Capa 5 (2026-05-11)*
 
 Página web mínima para login y configuración del MCP. No es una app completa: el grueso de la interacción ocurre en el Claude del usuario.
 
 - Pantalla de login con redirect a Microsoft SSO.
 - Pantalla `/mcp-setup` que muestra al usuario logueado la URL del MCP server y un bearer token personal con instrucciones de cómo configurarlo en Claude Code y Claude Desktop.
 - (Opcional, fase posterior) Listado del histórico propio de transcripciones con borrar/exportar.
+
+> El bundle React + Vite + Tailwind del componente A no está implementado en Capas 1-4. El backend ya expone `/auth/login`, `/auth/me`, `/auth/regenerate-mcp-token` (Capa 2) que serán los endpoints de soporte. Ver RF-UI-01 / RF-UI-02 con status `Pendiente Capa 5`.
 
 **B. Servicio de Autenticación**
 

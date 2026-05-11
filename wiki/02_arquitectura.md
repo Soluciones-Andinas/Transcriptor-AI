@@ -8,7 +8,7 @@ Este orden gobierna todos los tradeoffs y es la referencia para `AGENTS.md` / `C
 
 ## 1. Resumen Ejecutivo
 
-API multi-tenant con frontend mínimo y servidor MCP que recibe archivos de audio/video de los usuarios autenticados, devuelve transcripción diarizada en español, y expone esos datos vía MCP para que el Claude personal de cada usuario pueda generar minutas. Stack: FastAPI + WhisperX (Whisper large-v3 cuantizado int8_float16 + pyannote 3.1) + ffmpeg + PostgreSQL + React/Vite, sobre Docker con GPU pass-through en un rig privado con NVIDIA RTX 4060 Ti 8 GB VRAM en intranet de Sandinas. Autenticación con Microsoft Entra ID OAuth 2.0. La generación de minutas ocurre en el Claude del usuario (no en el backend); el backend mantiene la transcripción y las imágenes asociadas, expuestas vía tools y resources MCP. Decisiones críticas: pipeline síncrono ([ADR-003](ADR/ADR-003.md)), caché efímero por audio_hash en filesystem ([ADR-004](ADR/ADR-004.md)), datos persistentes en Postgres ([ADR-008](ADR/ADR-008.md)), Microsoft Entra ID SSO ([ADR-009](ADR/ADR-009.md)), UI React mínima ([ADR-010](ADR/ADR-010.md)), MCP-first con REST mínimo ([ADR-011](ADR/ADR-011.md)), minutas en Claude del user ([ADR-012](ADR/ADR-012.md)), uploads HTTP con bearer ([ADR-013](ADR/ADR-013.md)).
+API multi-tenant con frontend mínimo y servidor MCP que recibe archivos de audio/video de los usuarios autenticados, devuelve transcripción diarizada en español, y expone esos datos vía MCP para que el Claude personal de cada usuario pueda generar minutas. Stack: FastAPI + WhisperX (Whisper large-v3 cuantizado int8_float16 + pyannote 3.1) + ffmpeg + PostgreSQL + React/Vite, sobre Docker con GPU pass-through en un rig privado con NVIDIA RTX 4060 Ti 8 GB VRAM en intranet de Sandinas. Autenticación con Microsoft Entra ID OAuth 2.0. La generación de minutas ocurre en el Claude del usuario (no en el backend); el backend mantiene la transcripción y las imágenes asociadas, expuestas vía tools y resources MCP. Decisiones críticas: pipeline síncrono ([ADR-003](ADR/ADR-003.md)), caché efímero por audio_hash en filesystem ([ADR-004](ADR/ADR-004.md)), datos persistentes en Postgres ([ADR-008](ADR/ADR-008.md)), Microsoft Entra ID SSO ([ADR-009](ADR/ADR-009.md)), UI React mínima ([ADR-010](ADR/ADR-010.md)), MCP-first con REST mínimo ([ADR-011](ADR/ADR-011.md)), minutas en Claude del user ([ADR-012](ADR/ADR-012.md)), uploads HTTP con bearer efímero S3-style ([ADR-017](ADR/ADR-017.md), reemplaza [ADR-013](ADR/ADR-013.md)).
 
 ## 2. Vista de Contexto (C4 Nivel 1)
 
@@ -174,10 +174,11 @@ sequenceDiagram
 | [ADR-010](ADR/ADR-010.md) | React + Vite UI mínima | Aceptada | 2026-04-30 | §3, §6 — agrega componente UI |
 | [ADR-011](ADR/ADR-011.md) | MCP Server como protocolo principal + REST mínimo para blobs | Aceptada | 2026-04-30 | §3, §4 — define superficie de integración |
 | [ADR-012](ADR/ADR-012.md) | Generación de minutas en Claude del user | Aceptada | 2026-04-30 | §1 alcance, §3 — ningún componente backend genera minutas |
-| [ADR-013](ADR/ADR-013.md) | Upload de blobs vía endpoints HTTP autenticados | Aceptada | 2026-04-30 | §3, §4 — define `/api/upload`, `/api/upload-image` |
+| [ADR-013](ADR/ADR-013.md) | Upload de blobs vía endpoints HTTP autenticados (Opción A original con bearer MCP) | Reemplazada por ADR-017 | 2026-04-30 | §3, §4 — versión histórica; ver ADR-017 para el patrón as-built |
 | [ADR-014](ADR/ADR-014.md) | Per-user scoping enforcement vía SQLAlchemy event listener | Reemplazada por ADR-015 | 2026-05-04 | §3 — versión fail-open original |
 | [ADR-015](ADR/ADR-015.md) | Listener de scoping fail-closed + `bypass_scoping` context manager | Aceptada | 2026-05-05 | §3, §8 — query sin `user_id` armado raise `ScopingNotArmedError`; bypass explícito vía context manager |
 | [ADR-016](ADR/ADR-016.md) | Defensa en capas para per-user scoping (startup classification + listener) | Aceptada | 2026-05-07 | §8 — startup guard complementa listener fail-closed; modelo nuevo sin `user_id` rompe boot en lugar de leak silencioso |
+| [ADR-017](ADR/ADR-017.md) | Upload con bearer efímero per-upload (S3-style) | Aceptada | 2026-05-11 | §3, §4 — Privacy: blast radius ≤10 min vs bearer MCP indefinido; formaliza patrón as-built en Capa 4 (`upload_bearer_hash` + `hmac.compare_digest`) |
 
 ## 8. Seguridad, Observabilidad y Resiliencia
 

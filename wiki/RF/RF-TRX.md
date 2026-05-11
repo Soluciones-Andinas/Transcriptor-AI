@@ -344,11 +344,11 @@ Scenario: Cache vencido se trata como miss
 | # | Paso | Componente responsable |
 |---|---|---|
 | 1 | FastAPI middleware verifica `content-length` ≤ `MAX_UPLOAD_MB * 1024 * 1024` | FastAPI |
-| 2 | Si excede: responder 413 + `{"error_code": "FILE_TOO_LARGE", ...}` | FastAPI |
+| 2 | Si excede: responder 413 + `{"error_code": "AUDIO_TOO_LARGE", ...}` (REST) / `FILE_TOO_LARGE` si llega vía MCP tool | FastAPI / MCP tool |
 | 3 | Extraer extensión del filename: `Path(filename).suffix.lower().lstrip(".")` | Handler |
-| 4 | Si extensión no está en `ALLOWED_EXTENSIONS`: responder 400 + `{"error_code": "UNSUPPORTED_EXTENSION", "detail": "Allowed: mp4, mp3, wav, m4a, flac"}` | Handler |
+| 4 | Si extensión no está en `ALLOWED_EXTENSIONS`: aplicar magic-byte fallback (ver §Special Cases). Si tampoco matchea: responder 400 + `{"error_code": "AUDIO_FORMAT_INVALID", "detail": "Allowed: mp4, mp3, wav, m4a, flac"}` | Handler / `pipeline/normalize.py` |
 | 5 | Verificar que el contenido no sea vacío (`len(bytes) > 0`) | Handler |
-| 6 | Si vacío: responder 400 + `{"error_code": "INVALID_FORMAT", "detail": "Empty file"}` | Handler |
+| 6 | Si vacío o ffmpeg falla en normalize posterior: responder 400 + `{"error_code": "AUDIO_FORMAT_INVALID", "detail": "Empty file"}` o `"detail": "ffmpeg failed"` | Handler |
 | 7 | Devolver control a RF-TRX-01 paso 2 | Handler |
 
 ### Outputs
@@ -360,17 +360,19 @@ Scenario: Cache vencido se trata como miss
 
 ### Typed Errors
 
-| Código | HTTP | Causa | Trigger |
-|---|---|---|---|
-| `FILE_TOO_LARGE` | 413 | Archivo excede límite | `content-length > MAX_UPLOAD_MB*1024*1024` |
-| `UNSUPPORTED_EXTENSION` | 400 | Extensión no permitida | `extension not in ALLOWED_EXTENSIONS` |
-| `INVALID_FORMAT` | 400 | Contenido vacío o corrupto antes de ffmpeg | `len(file.read()) == 0` |
+| Código | HTTP | Emisor | Causa | Trigger |
+|---|---|---|---|---|
+| `AUDIO_TOO_LARGE` | 413 | REST `api/transcriptions` | Archivo excede límite | `content-length > MAX_UPLOAD_MB*1024*1024` |
+| `FILE_TOO_LARGE` | 413 | MCP tool `request_upload_url` | Mismo significado, alias MCP-side | `file_size_bytes > MAX_UPLOAD_MB*1024*1024` |
+| `AUDIO_FORMAT_INVALID` | 400 | REST + normalize | Extensión + magic-byte fallback fallan, ffmpeg falla, o contenido vacío. Unifica los viejos `UNSUPPORTED_EXTENSION` e `INVALID_FORMAT` (drift D-052) | extension ∉ ALLOWED + magic ∉ {RIFF, fLaC, ID3, 0xFFE, ftyp}; o `len(file.read()) == 0`; o ffmpeg returncode ≠ 0 |
+| `INVALID_PARAMETER` | 400 | REST + MCP tools | Parámetro fuera de rango | `min_speakers > max_speakers`, `language ∉ {es, en, ...}`, etc. |
 
 ### Special Cases and Variants
 
-- **Filename sin extensión** (ej: `audio` sin sufijo): rechazo con `UNSUPPORTED_EXTENSION`.
-- **Doble extensión** (ej: `audio.tar.mp3`): se evalúa solo la última (`.mp3`).
-- **Extensión correcta pero contenido falso** (ej: `.mp4` con bytes que no son MP4): pasa esta validación; ffmpeg falla en RF-TRX-01 paso 4 y se responde con `INVALID_FORMAT`.
+- **Filename sin extensión** (ej: `audio` o `original.bin` del upload endpoint): el handler intenta detectar formato por **magic bytes** (drift D-080). El módulo `pipeline/normalize.py` lee los primeros bytes del archivo y mapea contra cinco containers conocidos: `RIFF/WAVE` → `wav`, `fLaC` → `flac`, `ID3` o `0xFFE` (frame sync MP3) → `mp3`, `ftyp` en bytes 4-8 → `mp4`. Si **alguno** matchea, continúa el flujo con la extensión inferida. Si **ninguno** matchea, responde 400 + `AUDIO_FORMAT_INVALID`. Este fallback existe porque el upload chunked de Capa 4 (RF-MCP-01) persiste el binario como `original.bin` (sin extensión real) — D-048 introdujo el patrón, D-080 lo documentó.
+- **Doble extensión** (ej: `audio.tar.mp3`): se evalúa solo la última (`.mp3`); si el magic-byte de ese sufijo no coincide, fallback opera normalmente.
+- **Extensión correcta pero contenido falso** (ej: `.mp4` con bytes que no son MP4): el magic-byte check rechaza con `AUDIO_FORMAT_INVALID` antes de invocar ffmpeg.
+- **Extensión hostile con contenido válido** (ej: `.txt` con bytes MP3): el magic-byte fallback **acepta** el archivo y procesa con la extensión inferida. Esto es una desviación intencional del contrato suffix-only original — ver D-080 en el drift log para el rationale.
 - **`min_speakers > max_speakers`**: 400 + `{"error_code": "INVALID_PARAMETER", "detail": "min_speakers must be <= max_speakers"}`.
 
 ### Data Model Impact
@@ -386,18 +388,24 @@ Scenario: Archivo de tamaño aceptable y extensión permitida
   When POST /transcribe
   Then la validación pasa al siguiente paso
 
-Scenario Outline: Rechazo por tamaño o extensión
+Scenario Outline: Rechazo por tamaño, formato o ambigüedad de contenedor
   Given MAX_UPLOAD_MB=500
   When POST /transcribe con archivo <descripcion>
   Then la respuesta es <status>
     And el body contiene error_code=<error_code>
 
   Examples:
-    | descripcion                       | status | error_code            |
-    | MP4 de 600 MB                     | 413    | FILE_TOO_LARGE        |
-    | archivo .txt de 1 MB              | 400    | UNSUPPORTED_EXTENSION |
-    | archivo sin extensión             | 400    | UNSUPPORTED_EXTENSION |
-    | archivo .mp4 de 0 bytes           | 400    | INVALID_FORMAT        |
+    | descripcion                                            | status | error_code            |
+    | MP4 de 600 MB                                          | 413    | AUDIO_TOO_LARGE       |
+    | archivo .txt de 1 MB con bytes random                  | 400    | AUDIO_FORMAT_INVALID  |
+    | archivo sin extensión + bytes que no matchean magic    | 400    | AUDIO_FORMAT_INVALID  |
+    | archivo .mp4 de 0 bytes                                | 400    | AUDIO_FORMAT_INVALID  |
+
+Scenario: Magic-byte fallback acepta extensión hostile con contenido válido
+  Given un archivo `audio.txt` cuyo contenido binario empieza con ID3 (MP3)
+  When POST /transcribe
+  Then la validación pasa (magic-byte detection identifica MP3)
+    And el flujo continúa al normalize
 
 Scenario: Parámetro min_speakers > max_speakers
   When POST /transcribe con file válido, min_speakers=8, max_speakers=2
@@ -410,17 +418,21 @@ Scenario: Parámetro min_speakers > max_speakers
 | Test ID | Tipo | Cubre |
 |---|---|---|
 | TP-TRX-03-pos-01 | Positivo | MP4 de 100 MB con extensión válida pasa |
-| TP-TRX-03-neg-01 | Negativo | Archivo de 600 MB → 413 FILE_TOO_LARGE |
-| TP-TRX-03-neg-02 | Negativo | `.txt` → 400 UNSUPPORTED_EXTENSION |
-| TP-TRX-03-neg-03 | Negativo | Sin extensión → 400 UNSUPPORTED_EXTENSION |
-| TP-TRX-03-neg-04 | Negativo | 0 bytes → 400 INVALID_FORMAT |
+| TP-TRX-03-pos-02 | Positivo | `audio.txt` con bytes MP3 (ID3) — magic-byte fallback acepta y procesa |
+| TP-TRX-03-neg-01 | Negativo | Archivo de 600 MB → 413 AUDIO_TOO_LARGE |
+| TP-TRX-03-neg-02 | Negativo | `.txt` con bytes random (sin magic conocido) → 400 AUDIO_FORMAT_INVALID |
+| TP-TRX-03-neg-03 | Negativo | Sin extensión + bytes random → 400 AUDIO_FORMAT_INVALID |
+| TP-TRX-03-neg-04 | Negativo | 0 bytes → 400 AUDIO_FORMAT_INVALID (detail="Empty file") |
 | TP-TRX-03-neg-05 | Negativo | `min_speakers > max_speakers` → 400 INVALID_PARAMETER |
 
 ### No Ambiguities Left
 
-- **Forbidden assumptions**: no se confía en `Content-Type` HTTP; sólo en extensión + intento de ffmpeg.
-- **Closed decisions**: lista de extensiones es config (default `mp4,mp3,wav,m4a,flac`); no se incluyen `.ogg` ni `.opus` por baja prevalencia (revisar si Sandinas lo usa).
-- **Out of scope**: validación profunda del contenido (magic bytes); se delega a ffmpeg.
+- **Forbidden assumptions**: no se confía en `Content-Type` HTTP. Sí se valida `Path.suffix` + magic-byte fallback como defensa en dos pasos antes de invocar ffmpeg.
+- **Closed decisions**:
+  - Lista de extensiones es config (default `mp4,mp3,wav,m4a,flac`); no se incluyen `.ogg` ni `.opus` por baja prevalencia (revisar si Sandinas lo usa).
+  - **Magic-byte fallback** (D-080) habilitado: cuando `Path.suffix` no matchea, el handler sniff los primeros bytes y verifica contra cinco containers conocidos (RIFF/WAVE, fLaC, ID3, MP3 frame sync 0xFFE, ftyp/MP4). Si matchea, continúa con la extensión inferida; si no, rechaza con `AUDIO_FORMAT_INVALID`. Implementación en `pipeline/normalize.py::_detect_ext_by_magic`.
+  - Consecuencia: un archivo `.txt` que en realidad contiene MP3 válido **es aceptado**. Esto es una desviación deliberada del contrato suffix-only original que existía para soportar el upload chunked de Capa 4 (que persiste como `original.bin`).
+- **Out of scope**: validación profunda del contenido más allá de los primeros bytes; el resto se delega a ffmpeg en RF-TRX-01 paso 4. La detección de archivos parcialmente corruptos (header válido + payload roto) ocurre en ffmpeg y produce `AUDIO_FORMAT_INVALID` con `detail` indicando "ffmpeg failed".
 
 **TODO explicit = 0**.
 
