@@ -3,6 +3,8 @@
 **Source flow**: [`FL-AUTH-01`](../FL/FL-AUTH-01.md), [`FL-MCP-01`](../FL/FL-MCP-01.md)
 **Architecture**: [`02_arquitectura.md`](../02_arquitectura.md) §3 (componente B), §8 (Seguridad)
 **Data model**: [`05_modelo_datos.md`](../05_modelo_datos.md) §2 (`users`, `oauth_tokens`, `mcp_bearers`)
+**ADRs relacionados** (D-067, 2026-05-11): [ADR-009](../ADR/ADR-009.md) Microsoft Entra ID SSO · [ADR-014](../ADR/ADR-014.md) (Reemplazada) → [ADR-015](../ADR/ADR-015.md) listener fail-closed · [ADR-016](../ADR/ADR-016.md) defensa en capas · [ADR-017](../ADR/ADR-017.md) upload bearer efímero. Las dependencies `get_current_user_web` / `get_current_user_mcp` arman `session.info["user_id"]` via `bypass_scoping`; sin eso, queries contra modelos per-user raisean `ScopingNotArmedError`.
+**Configuración**: TTL de la cookie session es configurable vía env `SESSION_TTL_SECONDS` (default 86400 = 24h, D-069); `JWT_SECRET` debe tener ≥32 chars (validado en config-load, D-070); `OAUTH_TOKEN_ENC_KEY` debe ser base64 de 32 bytes (AES-256-GCM key, validado en config-load).
 **Hardening level**: Execution-Normative
 
 ## Tabla resumen
@@ -17,6 +19,7 @@
 | RF-AUTH-06 | `GET /auth/me` | Usuario | Cookie sesión válida | — | JSON con user + bearer activo (sin plaintext) | Given user logueado, when GET /auth/me, then 200 con datos |
 | RF-AUTH-07 | `POST /auth/regenerate-mcp-token` | Usuario | Cookie sesión válida | — | Nuevo bearer plaintext + revoca anterior | Given user logueado, when regenerate, then nuevo bearer y viejo revocado |
 | RF-AUTH-08 | Banner UI sobre estado del bearer post-logout (ALT-1) | UI / Usuario | Páginas `/mcp-setup` y `/auth/me` | Estado del bearer activo del user | Mensaje visible explicando que `POST /auth/logout` no revoca el bearer | Given user post-logout, when carga `/mcp-setup` o `/auth/me`, then ve banner que indica que el bearer sigue activo y cómo revocarlo |
+| RF-AUTH-09 | `POST /auth/logout` cierra sesión web | Usuario | (ninguna) | — | 302 a `/login` + `Set-Cookie: session=; Max-Age=0` | Given cookie session presente o ausente, when POST /auth/logout, then cookie borrada y redirect a /login (D-064) |
 
 ---
 
@@ -107,7 +110,9 @@ Scenario: User ya logueado intenta login
 ### No Ambiguities Left
 
 - **Forbidden assumptions**: no se asume scope `offline_access` (no se gestiona refresh token aún en MVP).
-- **Closed decisions**: PKCE S256 obligatorio; cookie temp con TTL 5 min.
+- **Closed decisions**:
+  - PKCE S256 obligatorio; cookie temp con TTL 5 min.
+  - Cookie `oauth_state` firmada con `itsdangerous.URLSafeTimedSerializer(secret, salt="oauth-state-v1")` (D-072): payload short-lived que nunca sale a un third party; tamper-evidence + expiry son suficientes sin overhead de JWT.
 - **Out of scope**: MFA específico (heredado de tenant); login con cuenta externa.
 
 **TODO explicit = 0**.
@@ -234,7 +239,11 @@ Scenario: State no coincide
 ### No Ambiguities Left
 
 - **Forbidden assumptions**: no se asume rotación automática de refresh token; se hace en background o al fallar access token.
-- **Closed decisions**: tokens encriptados con AES-256-GCM usando `OAUTH_TOKEN_ENC_KEY`; JWT firmado HS256 con `JWT_SECRET`.
+- **Closed decisions**:
+  - Tokens encriptados con AES-256-GCM usando `OAUTH_TOKEN_ENC_KEY`.
+  - JWT firmado HS256 con `JWT_SECRET` (mínimo 32 chars, validado en config-load — D-070). Generar con `python -c 'import secrets; print(secrets.token_urlsafe(48))'`.
+  - **Email fallback** (D-066, fix H-9): el handler extrae `email = claims.get("email") or claims.get("preferred_username")`. Caso MS Entra B2B / guest donde `email` viene vacío y `preferred_username` carga el UPN. Si ambos faltan → `AUTH_PROVIDER_UNAVAILABLE`.
+  - **JWKS retry on signature failure** (D-071, fix CR-1): ante `IdTokenInvalid` (firma fallida), el handler fuerza `fetch_jwks(force_refresh=True)` y reintenta una vez. Cubre el caso de rotación de la signing key de MS Entra mientras el JWKS está cacheado. Si el retry también falla → `AUTH_PROVIDER_UNAVAILABLE`. Cache TTL 24h; `asyncio.Lock` serializa refreshes concurrentes (H-5).
 - **Out of scope**: invalidar cookie session si el user es removido del tenant (depende de policy del tenant).
 
 **TODO explicit = 0**.
@@ -603,5 +612,72 @@ Scenario: User clica "Revocar bearer"
 - **Forbidden assumptions**: el banner no debe pretender que el logout web revoca el bearer; la implementación actual del backend (ALT-1) es deliberada.
 - **Closed decisions**: texto en español rioplatense, botón explícito (no link sutil), siempre visible si `bearer.id != null` y `plaintext == null`.
 - **Out of scope**: notificaciones email del estado del bearer (no necesario para v0.1).
+
+> **D-063 (2026-05-11)**: la sección Test Traceability de RF-AUTH-08 referencia IDs `TP-AUTH-08-pos-01/02`, `TP-AUTH-08-neg-01`, `TP-AUTH-08-int-01` que pertenecen a la spec UI futura. Como RF-AUTH-08 es Pendiente Capa 5 (depende de RF-UI-01/02 también pendientes), esos test IDs se materializarán cuando se implemente el frontend React. La doc TP-AUTH actual cubre RF-AUTH-01 a RF-AUTH-07 (los flows con backend ya implementado).
+
+**TODO explicit = 0**.
+
+---
+
+## RF-AUTH-09: POST /auth/logout
+
+### Execution Sheet
+
+| Campo | Valor |
+|---|---|
+| ID | RF-AUTH-09 |
+| Título | Cerrar sesión web borrando la cookie `session` |
+| Actor primario | Usuario |
+| Prioridad | Media |
+| Severidad | Menor |
+| Flujo origen | Implícito post-RF-AUTH-02 (limpieza de sesión); referenciado por RF-AUTH-08 ALT-1 |
+
+> **D-064 (2026-05-11)**: el endpoint estaba implementado desde Capa 2 pero sin RF dedicado. Esta sección formaliza el contrato as-built en `src/transcription_api/auth/routes.py::logout` para cerrar la trazabilidad. ALT-1 (no revoca el bearer MCP) está documentado en RF-AUTH-08.
+
+### Precondiciones
+
+| # | Condición | Verificación |
+|---|---|---|
+| 1 | El endpoint es accesible sin auth | Default: anyone puede llamarlo (defensa contra cookies corruptas) |
+
+### Inputs
+
+Sin body. La cookie `session` puede estar presente, ausente o ser inválida — el endpoint la borra incondicionalmente.
+
+### Process Steps
+
+| # | Paso |
+|---|---|
+| 1 | Construir `RedirectResponse(url="/login", status_code=302)` |
+| 2 | `response.delete_cookie("session", path="/", secure=True, httponly=True, samesite="strict")` |
+| 3 | Emitir log `auth_logout` (sin campos, ver D-065 en `wiki/05_modelo_datos.md §7`) |
+| 4 | Retornar la response |
+
+### Outputs
+
+- HTTP 302 + `Set-Cookie: session=; Max-Age=0` + redirect a `/login`.
+
+### Typed Errors
+
+Ninguno. El endpoint es idempotente y best-effort.
+
+### Special Cases and Variants
+
+- **ALT-1 — Logout no revoca bearer MCP**: documentado y justificado en RF-AUTH-08. El user puede estar usando el bearer desde Claude Desktop (sin browser involucrado); revocar al logout web sería una sorpresa destructiva. Para revocar explícitamente: `POST /auth/regenerate-mcp-token`.
+- **Cookie ausente**: el endpoint igual emite el `Set-Cookie: ... Max-Age=0` (idempotente).
+- **Cookie corrupta**: igual — el endpoint no decodifica la cookie, solo la marca como expirada en el browser.
+
+### Test Traceability
+
+| Test ID | Tipo | Cubre |
+|---|---|---|
+| TP-AUTH-09-pos-01 | Positivo | User logueado → POST /auth/logout → 302 a /login + cookie cleared (existing test as `test_logout_clears_session_cookie`) |
+| TP-AUTH-09-pos-02 | Positivo | El logout NO revoca el bearer MCP (existing test as `test_logout_does_not_revoke_mcp_bearer`) |
+
+### No Ambiguities Left
+
+- **Forbidden assumptions**: el endpoint no requiere auth; el operador no puede asumir que el caller ya esté autenticado.
+- **Closed decisions**: redirect target es `/login` (siempre), no configurable. La cookie se borra con los mismos atributos con los que se setea (SameSite=Strict, Secure, HttpOnly).
+- **Out of scope**: revocar bearer en el logout (ALT-1 explícito); single sign-out con MS Entra (logout del IdP no se propaga al backend).
 
 **TODO explicit = 0**.

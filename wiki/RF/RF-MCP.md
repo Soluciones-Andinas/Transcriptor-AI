@@ -529,6 +529,8 @@ Scenario: Get transcription borrada
 
 Equivalente a RF-MCP-06 pero servido como Resource MCP (no tool). El SDK MCP maneja URI parsing y devolución como resource.
 
+> **D-088 (2026-05-11)**: `transcription_resource` delega a `get_transcription(transcription_id=...)` y aprovecha la validación de UUID interna del tool. `image_resource` (RF-MCP-08) tiene su propia validación de UUID inline. El "thin reuse" prometido aplica a `transcription_resource`, no a `image_resource`. Aceptado como code-smell (sin impacto funcional): un futuro refactor puede extraer `_parse_uuid_or_400(value, name)` a `mcp/lookup.py` y unificar ambos paths. No bloquea el contrato externo.
+
 ### Test Traceability
 
 | Test ID | Tipo |

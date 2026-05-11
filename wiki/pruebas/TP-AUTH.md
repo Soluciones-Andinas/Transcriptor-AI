@@ -7,7 +7,8 @@
 
 - Tests de auth NO golpean Microsoft Entra real. Se mockea con `responses` o `httpx-mock` el endpoint `/oauth2/v2.0/token` y JWKS.
 - Para validar firmas de id_token se usa una clave RSA fixture y un JWKS local que el código lee en lugar del de MS en tests.
-- Variables de entorno para tests: `MS_CLIENT_ID=test-client`, `MS_TENANT_ID=test-tenant`, `MS_CLIENT_SECRET=test-secret`, `OAUTH_TOKEN_ENC_KEY=<32 bytes b64>`, `JWT_SECRET=<test-secret>`.
+- Variables de entorno para tests: `MS_CLIENT_ID=test-client`, `MS_TENANT_ID=test-tenant`, `MS_CLIENT_SECRET=test-secret`, `OAUTH_TOKEN_ENC_KEY=<32 bytes b64>`, `JWT_SECRET=<32+ chars>` (D-070: validación de longitud en config-load).
+- **Marker `requires_docker`** (D-068, 2026-05-11): los tests integration de auth viven en `tests/integration/auth/` y todos llevan `pytestmark = pytest.mark.requires_docker` a nivel módulo. El conftest auto-skipea cuando `docker info` no responde — útil en máquinas dev sin Docker, pero implica que `pytest tests/integration/auth/ -v` muestra "all skipped" en esos entornos. CI tiene Docker y los corre todos. Para correr local: levantar Docker Desktop antes de pytest. Ver `CLAUDE.md §12` para la lista completa de markers.
 
 ## TP-AUTH-01: Iniciar flow OAuth (RF-AUTH-01)
 

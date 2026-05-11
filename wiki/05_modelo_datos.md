@@ -100,7 +100,7 @@ Histórico persistente. Una entrada por cada `start_transcription` exitoso. No t
 
 Index:
 - `idx_transcriptions_user_created` (`user_id`, `created_at DESC`) WHERE `deleted_at IS NULL`.
-- `idx_transcriptions_audio_hash` (`audio_hash`).
+- `idx_transcriptions_audio_hash` (`audio_hash`) — **D-089 (2026-05-11)**: ningún query ORM actualmente filtra por `audio_hash` (las tools MCP filtran por `id`, `user_id`, `text_content`, `created_at`; el cache filesystem usa el hash contra disco, no contra Postgres). El índice queda como reserva para una eventual feature "analytics cross-user por audio_hash" o "dedup detection". Si Capa 6 no lo aprovecha, drop en migración futura.
 - `idx_transcriptions_text_fts` GIN (`to_tsvector('spanish', text)`) WHERE `deleted_at IS NULL` — full-text search parcial, alineado con el filtro de `idx_transcriptions_user_created` para que el planner combine ambos índices sin recheck sobre filas borradas.
 
 ### Tabla `images`
@@ -160,6 +160,7 @@ Este es el JSON que se devuelve en `get_transcription` y se cachea en el filesys
   "duration_seconds": 3247.5,
   "language": "es",
   "num_speakers": 3,
+  "text_content": "Buenas, gracias por venir a la reunión. ...",
   "segments": [
     {
       "start": 0.0,
@@ -178,7 +179,7 @@ Este es el JSON que se devuelve en `get_transcription` y se cachea en el filesys
     "processing_seconds": 187.4,
     "rtf": 17.3,
     "audio_hash": "8f3a7e2c1b...0d",
-    "served_from_cache": false
+    "cache_hit": false
   },
   "images": [
     { "id": "img_uuid", "filename": "diagrama-arq.png", "mime_type": "image/png", "size_bytes": 12345 }
@@ -197,19 +198,9 @@ Las primeras secciones (segments, metadata) son las del cache filesystem.
 4. `num_speakers` igual a la cardinalidad de `{segment.speaker}`.
 5. `metadata.rtf = duration_seconds / processing_seconds`.
 
-## 4. Entidad `CacheMeta` (filesystem, sin cambios)
+## 4. Entidad `CacheMeta` — RETIRADA post-D-027/D-054
 
-```json
-{
-  "audio_hash": "8f3a7e2c1b...0d",
-  "duration_seconds": 3247.5,
-  "created_at": "2026-04-30T15:42:08.123456+00:00",
-  "ttl_seconds": 86400,
-  "schema_version": 1
-}
-```
-
-A diferencia de la versión anterior, **no contiene `original_filename` ni `original_size_bytes`** (esos viven en `transcriptions` ahora). El caché efímero es de pipeline, no de identidad.
+> **D-054 (2026-05-11)**: la entidad `CacheMeta` fue eliminada del modelo as-built. Post-D-027 el cache pasó a single-file (`<DATA_DIR>/cache/<user_id>/<audio_hash>/result.json`) y el TTL se deriva del `mtime` del filesystem — no hay archivo `meta.json` separado ni campo `created_at`/`schema_version` parseable. La detección de corrupción ocurre en read-time (`cache.get` retorna `None`, ver RF-CACHE-03 reescrita 2026-05-11). Si una versión futura introduce schema explícito, se documentará bajo una entidad nueva con un ADR dedicado.
 
 ## 5. Entidades transitorias (no persistidas)
 
@@ -305,7 +296,7 @@ Estos eventos son contractuales: los RFs los referencian para criterios de acept
 | `auth_user_created` | INFO | `request_id`, `user_id`, `email`, `microsoft_oid` | Primer login del user |
 | `auth_user_login` | INFO | `request_id`, `user_id` | Login subsiguiente |
 | `auth_session_expired` | INFO | `user_id` | JWT cookie vence |
-| `auth_logout` | INFO | `user_id` | `POST /auth/logout` |
+| `auth_logout` | INFO | (sin campos) | `POST /auth/logout` — **D-065 (2026-05-11)**: el endpoint no usa `Depends(get_current_user_web)` (debe permitir logout incluso con cookie corrupta), por lo que `user_id` no está disponible en el contexto. El log queda como evento sin campos; cuando se introduzca correlation-id middleware, se agregará `request_id`. |
 | `mcp_bearer_generated` | INFO | `user_id`, `bearer_id` | Tras login o `regenerate-mcp-token` |
 | `mcp_bearer_revoked` | INFO | `user_id`, `bearer_id` | Tras `regenerate-mcp-token` (revoca el previo) |
 
